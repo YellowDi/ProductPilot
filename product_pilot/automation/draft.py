@@ -130,9 +130,9 @@ def fill_minimal_draft_fields(
     notes.append(f"processed sku options: {'; '.join(processed_groups)}")
     page.wait_for_timeout(2_000)
 
-    fill_sku_table(page, sorted_skus)
+    sku_fill_method = fill_sku_table(page, sorted_skus)
     fill_first_placeholder(page, "应大于商品最大单买价", _format_decimal(data.reference_price))
-    notes.append("filled sku stock and prices")
+    notes.append(f"filled sku stock and prices via {sku_fill_method}")
 
     return notes
 
@@ -515,14 +515,19 @@ def first_sku_image_by_value(
     return images
 
 
-def fill_sku_table(page: Any, skus: tuple[DraftSkuData, ...]) -> None:
+def fill_sku_table(page: Any, skus: tuple[DraftSkuData, ...]) -> str:
+    batch_sku = uniform_batch_sku(skus)
+    if batch_sku is not None:
+        fill_batch_sku_values(page, batch_sku)
+        return "batch setting"
+
     stock_inputs = page.get_by_placeholder("库存")
     group_price_inputs = page.get_by_placeholder("拼单价")
     single_price_inputs = page.get_by_placeholder("单买价")
 
     if stock_inputs.count() < len(skus):
         fill_batch_sku_values(page, skus[0])
-        return
+        return "batch setting"
 
     if group_price_inputs.count() < len(skus):
         raise ValueError(f"expected at least {len(skus)} group price inputs, found {group_price_inputs.count()}")
@@ -533,6 +538,21 @@ def fill_sku_table(page: Any, skus: tuple[DraftSkuData, ...]) -> None:
         stock_inputs.nth(index).fill(str(sku.stock))
         group_price_inputs.nth(index).fill(_format_decimal(sku.group_price))
         single_price_inputs.nth(index).fill(_format_decimal(sku.single_price))
+    return "row inputs"
+
+
+def uniform_batch_sku(skus: tuple[DraftSkuData, ...]) -> DraftSkuData | None:
+    if not skus:
+        return None
+    first = skus[0]
+    for sku in skus[1:]:
+        if (
+            sku.stock != first.stock
+            or sku.group_price != first.group_price
+            or sku.single_price != first.single_price
+        ):
+            return None
+    return first
 
 
 def fill_batch_sku_values(page: Any, sku: DraftSkuData) -> None:

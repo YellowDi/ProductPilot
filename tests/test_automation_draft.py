@@ -15,6 +15,7 @@ from product_pilot.automation.draft import (
     main_image_from_product,
     sku_option_groups,
     sort_skus_for_page,
+    uniform_batch_sku,
     unique_sku_option_values,
 )
 from product_pilot.domain.product import ProductDraft
@@ -158,6 +159,22 @@ class DraftSpikeDataTests(unittest.TestCase):
             ("颜色分类", ("黑色", "棕色")),
             ("鞋码", ("38", "39")),
         ])
+
+    def test_detects_uniform_skus_for_batch_setting(self) -> None:
+        skus = (
+            DraftSkuData(size="黑色 38", stock=1000, group_price=Decimal("146.64"), single_price=Decimal("146.64")),
+            DraftSkuData(size="黑色 39", stock=1000, group_price=Decimal("146.64"), single_price=Decimal("146.64")),
+        )
+
+        self.assertIs(uniform_batch_sku(skus), skus[0])
+
+    def test_rejects_mixed_skus_for_batch_setting(self) -> None:
+        skus = (
+            DraftSkuData(size="黑色 38", stock=1000, group_price=Decimal("146.64"), single_price=Decimal("146.64")),
+            DraftSkuData(size="黑色 39", stock=998, group_price=Decimal("146.64"), single_price=Decimal("146.64")),
+        )
+
+        self.assertIsNone(uniform_batch_sku(skus))
 
     def test_classifies_visible_image_inputs_after_batch_upload_as_sku_targets(self) -> None:
         targets = [

@@ -493,7 +493,8 @@ def draft_spike(args: argparse.Namespace) -> int:
     )
 
     try:
-        with PersistentBrowserSession(config) as session:
+        session = PersistentBrowserSession(config).__enter__()
+        try:
             session.open_backend()
             if args.hold:
                 wait_for_user("Complete manual login or risk checks in the opened browser, then press Enter...")
@@ -570,6 +571,24 @@ def draft_spike(args: argparse.Namespace) -> int:
             print(f"json: {output_path.resolve()}")
             if args.keep_open:
                 wait_for_user("Press Enter to close the browser...")
+        except BrowserAutomationError:
+            raise
+        except Exception as exc:
+            print(f"draft spike failed: {exc}", file=sys.stderr)
+            try:
+                error_screenshot_path = session.take_screenshot("draft-spike-error")
+            except Exception as screenshot_exc:
+                print(f"error screenshot failed: {screenshot_exc}", file=sys.stderr)
+            else:
+                print(f"screenshot: {error_screenshot_path.resolve()}")
+            if args.keep_open:
+                wait_for_user(
+                    "Automation stopped. If a verification is visible, handle it in the browser, "
+                    "then press Enter to close the browser..."
+                )
+            return 1
+        finally:
+            session.close()
     except BrowserAutomationError as exc:
         print(str(exc), file=sys.stderr)
         return 2
