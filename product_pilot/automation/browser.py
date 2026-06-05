@@ -133,6 +133,12 @@ class PersistentBrowserSession:
         except Exception as exc:
             raise BrowserAutomationError(f"failed to open url: {exc}") from exc
 
+    def wait(self, timeout_ms: int) -> None:
+        if self.page is None:
+            raise BrowserAutomationError("browser session is not started")
+
+        self.page.wait_for_timeout(timeout_ms)
+
     def check_login(self) -> BrowserCheckResult:
         if self.page is None:
             raise BrowserAutomationError("browser session is not started")

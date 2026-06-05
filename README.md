@@ -54,6 +54,24 @@ python3 -m product_pilot.cli publish-page-check --hold
 
 This command only detects page readiness and writes a screenshot. It does not upload images, fill product data, save drafts, or publish listings.
 
+## Field Scan
+
+Upload a test main image and scan visible fields:
+
+```bash
+python3 -m product_pilot.cli field-scan --main-image SKU06.jpg --keep-open
+```
+
+The default category is currently fixed to `流行男鞋 > 低帮鞋 > 板鞋`.
+
+Advance to the product info page before scanning:
+
+```bash
+python3 -m product_pilot.cli field-scan --main-image SKU06.jpg --advance --keep-open
+```
+
+The command writes a screenshot and JSON scan result under `artifacts/browser`. It does not click save, submit, publish, or any final listing action.
+
 ## Quick Check
 
 ```bash

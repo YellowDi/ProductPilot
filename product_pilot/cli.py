@@ -6,12 +6,15 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from product_pilot.automation.browser import (
     BrowserAutomationError,
     BrowserLaunchConfig,
     PersistentBrowserSession,
 )
+from product_pilot.automation.category import DEFAULT_CATEGORY_PATH, format_category_path, parse_category_path, select_category
+from product_pilot.automation.field_scan import scan_publish_fields
 from product_pilot.automation.login import LoginState
 from product_pilot.automation.publish import PublishPageState
 from product_pilot.domain.product import ProductDraft
@@ -28,61 +31,78 @@ def build_parser() -> argparse.ArgumentParser:
         "browser-check",
         help="Open the merchant backend with a persistent browser profile and check login state.",
     )
-    browser_parser.add_argument("--url", default="https://mms.pinduoduo.com/", help="Merchant backend URL.")
-    browser_parser.add_argument(
-        "--profile-dir",
-        type=Path,
-        default=Path("profiles/chrome"),
-        help="Chrome/Chromium user data directory for persistent login state.",
-    )
-    browser_parser.add_argument(
-        "--artifacts-dir",
-        type=Path,
-        default=Path("artifacts/browser"),
-        help="Directory for screenshots and future trace artifacts.",
-    )
-    browser_parser.add_argument("--channel", default="chrome", help="Playwright browser channel.")
-    browser_parser.add_argument("--headless", action="store_true", help="Run browser in headless mode.")
-    browser_parser.add_argument("--timeout-ms", type=int, default=30_000, help="Default Playwright timeout.")
-    browser_parser.add_argument("--slow-mo-ms", type=int, default=0, help="Slow down browser actions.")
+    add_browser_arguments(browser_parser, default_url="https://mms.pinduoduo.com/", url_help="Merchant backend URL.")
     browser_parser.add_argument(
         "--hold",
         action="store_true",
         help="Keep the browser open for manual login before checking status.",
     )
+    browser_parser.add_argument("--keep-open", action="store_true", help="Keep browser open after printing results.")
 
     publish_parser = subparsers.add_parser(
         "publish-page-check",
         help="Open the product publish category page and check whether it is ready for automation.",
     )
-    publish_parser.add_argument(
-        "--url",
-        default="https://mms.pinduoduo.com/goods/category",
-        help="Product publish category page URL.",
+    add_browser_arguments(
+        publish_parser,
+        default_url="https://mms.pinduoduo.com/goods/category",
+        url_help="Product publish category page URL.",
     )
-    publish_parser.add_argument(
-        "--profile-dir",
-        type=Path,
-        default=Path("profiles/chrome"),
-        help="Chrome/Chromium user data directory for persistent login state.",
-    )
-    publish_parser.add_argument(
-        "--artifacts-dir",
-        type=Path,
-        default=Path("artifacts/browser"),
-        help="Directory for screenshots and future trace artifacts.",
-    )
-    publish_parser.add_argument("--channel", default="chrome", help="Playwright browser channel.")
-    publish_parser.add_argument("--headless", action="store_true", help="Run browser in headless mode.")
-    publish_parser.add_argument("--timeout-ms", type=int, default=30_000, help="Default Playwright timeout.")
-    publish_parser.add_argument("--slow-mo-ms", type=int, default=0, help="Slow down browser actions.")
     publish_parser.add_argument(
         "--hold",
         action="store_true",
         help="Keep the browser open for manual login or risk checks before checking status.",
     )
+    publish_parser.add_argument("--keep-open", action="store_true", help="Keep browser open after printing results.")
+
+    field_scan_parser = subparsers.add_parser(
+        "field-scan",
+        help="Upload a main image, optionally advance to product info, and scan required fields.",
+    )
+    add_browser_arguments(
+        field_scan_parser,
+        default_url="https://mms.pinduoduo.com/goods/category",
+        url_help="Product publish category page URL.",
+    )
+    field_scan_parser.add_argument("--main-image", type=Path, required=True, help="Main carousel image to upload.")
+    field_scan_parser.add_argument(
+        "--category-path",
+        default=format_category_path(DEFAULT_CATEGORY_PATH),
+        help="Category path to select after image upload.",
+    )
+    field_scan_parser.add_argument(
+        "--advance",
+        action="store_true",
+        help="Click the next-step button after uploading the main image. This does not save or publish.",
+    )
+    field_scan_parser.add_argument(
+        "--hold",
+        action="store_true",
+        help="Pause after opening the page for manual login or risk checks before upload.",
+    )
+    field_scan_parser.add_argument("--keep-open", action="store_true", help="Keep browser open after printing results.")
 
     return parser
+
+
+def add_browser_arguments(parser: argparse.ArgumentParser, *, default_url: str, url_help: str) -> None:
+    parser.add_argument("--url", default=default_url, help=url_help)
+    parser.add_argument(
+        "--profile-dir",
+        type=Path,
+        default=Path("profiles/chrome"),
+        help="Chrome/Chromium user data directory for persistent login state.",
+    )
+    parser.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        default=Path("artifacts/browser"),
+        help="Directory for screenshots and future trace artifacts.",
+    )
+    parser.add_argument("--channel", default="chrome", help="Playwright browser channel.")
+    parser.add_argument("--headless", action="store_true", help="Run browser in headless mode.")
+    parser.add_argument("--timeout-ms", type=int, default=30_000, help="Default Playwright timeout.")
+    parser.add_argument("--slow-mo-ms", type=int, default=0, help="Slow down browser actions.")
 
 
 def validate_product(path: Path) -> int:
@@ -114,6 +134,8 @@ def main(argv: list[str] | None = None) -> int:
         return browser_check(args)
     if args.command == "publish-page-check":
         return publish_page_check(args)
+    if args.command == "field-scan":
+        return field_scan(args)
 
     raise AssertionError(f"unsupported command: {args.command}")
 
@@ -135,6 +157,8 @@ def browser_check(args: argparse.Namespace) -> int:
             if args.hold:
                 input("Complete manual login in the opened browser, then press Enter to check status...")
             result = session.check_login()
+            if args.keep_open:
+                input("Press Enter to close the browser...")
     except BrowserAutomationError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -168,6 +192,8 @@ def publish_page_check(args: argparse.Namespace) -> int:
             if args.hold:
                 input("Complete manual login or risk checks in the opened browser, then press Enter...")
             result = session.check_publish_page()
+            if args.keep_open:
+                input("Press Enter to close the browser...")
     except BrowserAutomationError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -185,6 +211,99 @@ def publish_page_check(args: argparse.Namespace) -> int:
     }:
         return 1
     return 3
+
+
+def field_scan(args: argparse.Namespace) -> int:
+    main_image = args.main_image.resolve()
+    if not main_image.exists():
+        print(f"main image not found: {main_image}", file=sys.stderr)
+        return 2
+
+    config = BrowserLaunchConfig(
+        backend_url=args.url,
+        user_data_dir=args.profile_dir,
+        artifacts_dir=args.artifacts_dir,
+        channel=args.channel,
+        headless=args.headless,
+        timeout_ms=args.timeout_ms,
+        slow_mo_ms=args.slow_mo_ms,
+    )
+
+    try:
+        with PersistentBrowserSession(config) as session:
+            session.open_backend()
+            if args.hold:
+                input("Complete manual login or risk checks in the opened browser, then press Enter...")
+
+            page_check = session.check_publish_page()
+            if page_check.publish_page.state != PublishPageState.READY:
+                print(f"state: {page_check.publish_page.state.value}")
+                print(f"reason: {page_check.publish_page.reason}")
+                print(f"url: {page_check.publish_page.snapshot.url}")
+                print(f"screenshot: {page_check.screenshot_path.resolve()}")
+                if args.keep_open:
+                    input("Press Enter to close the browser...")
+                return 1
+
+            notes: list[str] = []
+            session.page.locator("input[type=file]").first.set_input_files(str(main_image))
+            session.wait(12_000)
+
+            category_path = parse_category_path(args.category_path)
+            if category_path:
+                try:
+                    category_result = select_category(session.page, category_path)
+                except Exception as exc:
+                    notes.append(f"category selection failed: {exc}")
+                    category_selected = False
+                else:
+                    category_selected = True
+                    notes.extend(category_result.notes)
+                    session.wait(2_000)
+            else:
+                category_selected = True
+
+            if args.advance and category_selected:
+                try:
+                    session.page.get_by_text("下一步, 完善商品信息", exact=True).click(timeout=8_000)
+                except Exception as exc:
+                    notes.append(f"advance failed: {exc}")
+                else:
+                    notes.append("advanced to product info page")
+                session.wait(8_000)
+            elif args.advance:
+                notes.append("advance skipped because category selection failed")
+
+            screenshot_path = session.take_screenshot("field-scan")
+            result = scan_publish_fields(session.page, screenshot_path, notes=notes)
+            output_path = result.screenshot_path.with_suffix(".json")
+            output_path.write_text(
+                json.dumps(result.to_mapping(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            print_field_scan_result(result, output_path)
+            if args.keep_open:
+                input("Press Enter to close the browser...")
+    except BrowserAutomationError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    return 0
+
+
+def print_field_scan_result(result: Any, output_path: Path) -> None:
+    print(f"url: {result.url}")
+    print(f"title: {result.title}")
+    print(f"required_labels: {', '.join(result.required_labels) if result.required_labels else '<none>'}")
+    print(f"fields: {len(result.fields)}")
+    print(f"actions: {len(result.actions)}")
+    if result.notes:
+        print("notes:")
+        for note in result.notes:
+            print(f"- {note.splitlines()[0]}")
+    print(f"screenshot: {result.screenshot_path.resolve()}")
+    print(f"json: {output_path.resolve()}")
 
 
 if __name__ == "__main__":
