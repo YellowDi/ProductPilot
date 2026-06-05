@@ -49,6 +49,43 @@ class ProductXlsxImporterTests(unittest.TestCase):
             with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
                 self.assertEqual(validate_product(workbook_path), 0)
 
+    def test_loads_multi_attribute_skus_with_product_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "main.jpg").write_bytes(b"test")
+            workbook_path = root / "product-input.xlsx"
+            _write_multi_sku_workbook(workbook_path)
+
+            products = load_products_from_xlsx(workbook_path)
+
+            product = products[0]
+            self.assertEqual(product.validate(), [])
+            self.assertEqual([sku.name for sku in product.skus], ["黑色 38", "黑色 39", "棕色 38"])
+            self.assertEqual(product.skus[0].attributes, {"颜色分类": "黑色", "鞋码": "38"})
+            self.assertEqual(str(product.skus[0].price), "146.64")
+            self.assertEqual(product.skus[0].stock, 20)
+            self.assertEqual(
+                [(image.role, image.sku_attribute, image.sku_value) for image in product.images],
+                [
+                    ("main", "", ""),
+                    ("main", "", ""),
+                    ("sku", "颜色分类", "黑色"),
+                    ("sku", "颜色分类", "棕色"),
+                ],
+            )
+
+    def test_defaults_blank_xlsx_stock_to_1000(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "main.jpg").write_bytes(b"test")
+            workbook_path = root / "product-input.xlsx"
+            _write_multi_sku_workbook(workbook_path, default_stock="")
+
+            product = load_products_from_xlsx(workbook_path)[0]
+
+            self.assertEqual(product.validate(), [])
+            self.assertEqual([sku.stock for sku in product.skus], [1000, 1000, 1000])
+
 
 def _write_product_workbook(path: Path) -> None:
     assert Workbook is not None
@@ -64,10 +101,34 @@ def _write_product_workbook(path: Path) -> None:
     skus.append(["SKU06", "42", "29.90", "39.90", "99.00", 10])
 
     images = workbook.create_sheet("图片")
-    images.append(["商品编号", "图片角色", "图片文件名"])
+    images.append(["商品编号", "图片角色", "图片文件名", "SKU属性", "SKU值"])
     images.append(["SKU06", "main", "main.jpg"])
     images.append(["SKU06", "detail", "detail-01.jpg"])
     images.append(["SKU06", "sku", "sku.jpg"])
+
+    workbook.save(path)
+
+
+def _write_multi_sku_workbook(path: Path, *, default_stock: int | str = 20) -> None:
+    assert Workbook is not None
+    workbook = Workbook()
+    products = workbook.active
+    products.title = "商品"
+    products.append(["商品编号", "商品标题", "类目路径", "商品描述", "默认拼单价", "默认库存"])
+    products.append(["SKU06", "多SKU测试商品", "流行男鞋 > 商务鞋 > 正装皮鞋", "", "146.64", default_stock])
+
+    skus = workbook.create_sheet("SKU")
+    skus.append(["商品编号", "颜色分类", "鞋码", "拼单价", "库存"])
+    skus.append(["SKU06", "黑色", "38", "", ""])
+    skus.append(["", "黑色", "39", "", ""])
+    skus.append(["", "棕色", "38", "", ""])
+
+    images = workbook.create_sheet("图片")
+    images.append(["商品编号", "图片角色", "图片文件名", "SKU属性", "SKU值"])
+    images.append(["SKU06", "main", "main-01.jpg", "", ""])
+    images.append(["", "main", "main-02.jpg", "", ""])
+    images.append(["", "sku", "sku-black.jpg", "颜色分类", "黑色"])
+    images.append(["", "sku", "sku-brown.jpg", "颜色分类", "棕色"])
 
     workbook.save(path)
 

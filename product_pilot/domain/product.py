@@ -12,12 +12,16 @@ from typing import Any
 class ProductImage:
     path: Path
     role: str = "gallery"
+    sku_attribute: str = ""
+    sku_value: str = ""
 
     @classmethod
     def from_mapping(cls, payload: dict[str, Any]) -> "ProductImage":
         return cls(
             path=Path(str(payload.get("path", ""))),
             role=str(payload.get("role", "gallery")),
+            sku_attribute=str(payload.get("sku_attribute", "")).strip(),
+            sku_value=str(payload.get("sku_value", "")).strip(),
         )
 
     def validate(self) -> list[str]:
@@ -26,6 +30,10 @@ class ProductImage:
             errors.append("image.path is required")
         if self.role not in {"main", "gallery", "detail", "sku"}:
             errors.append(f"image.role must be one of main, gallery, detail, sku: {self.role}")
+        if self.role != "sku" and (self.sku_attribute or self.sku_value):
+            errors.append("image sku binding is only allowed for sku images")
+        if bool(self.sku_attribute) != bool(self.sku_value):
+            errors.append("image sku binding requires both sku_attribute and sku_value")
         return errors
 
 
@@ -36,15 +44,25 @@ class ProductSku:
     stock: int
     single_price: Decimal | None = None
     reference_price: Decimal | None = None
+    attributes: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, payload: dict[str, Any]) -> "ProductSku":
+        attributes_payload = payload.get("attributes", {})
+        attributes: dict[str, str] = {}
+        if isinstance(attributes_payload, dict):
+            attributes = {
+                str(key).strip(): str(value).strip()
+                for key, value in attributes_payload.items()
+                if str(key).strip() and str(value).strip()
+            }
         return cls(
             name=str(payload.get("name", "")).strip(),
             price=_to_decimal(payload.get("price")),
             stock=_to_int(payload.get("stock")),
             single_price=_to_optional_decimal(payload.get("single_price")),
             reference_price=_to_optional_decimal(payload.get("reference_price")),
+            attributes=attributes,
         )
 
     def validate(self) -> list[str]:

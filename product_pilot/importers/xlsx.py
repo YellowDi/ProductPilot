@@ -13,6 +13,9 @@ class ProductWorkbookError(ValueError):
     pass
 
 
+DEFAULT_XLSX_STOCK = 1000
+
+
 SHEET_ALIASES = {
     "products": ("商品", "Products"),
     "skus": ("SKU", "SKUs"),
@@ -24,13 +27,21 @@ HEADER_ALIASES = {
     "title": ("商品标题", "title"),
     "category": ("类目路径", "category"),
     "description": ("商品描述", "description"),
+    "default_price": ("默认拼单价", "default_price"),
+    "default_single_price": ("默认单买价", "default_single_price"),
+    "default_reference_price": ("默认参考价", "default_reference_price"),
+    "default_stock": ("默认库存", "default_stock"),
     "sku_name": ("SKU名称", "sku_name", "name"),
+    "color": ("颜色分类", "color"),
+    "size": ("鞋码", "尺码", "size"),
     "price": ("拼单价", "price"),
     "single_price": ("单买价", "single_price"),
     "reference_price": ("参考价", "reference_price"),
     "stock": ("库存", "stock"),
     "image_role": ("图片角色", "image_role", "role"),
     "image_path": ("图片文件名", "图片路径", "文件名", "image_path", "path"),
+    "image_sku_attribute": ("SKU属性", "绑定SKU属性", "sku_attribute"),
+    "image_sku_value": ("SKU值", "绑定SKU值", "sku_value"),
 }
 
 
@@ -53,7 +64,7 @@ def load_products_from_xlsx(path: Path) -> list[ProductDraft]:
     images_sheet = _get_sheet(workbook, "images")
 
     products = _read_products(products_sheet)
-    skus_by_product_id = _read_skus(skus_sheet, set(products))
+    skus_by_product_id = _read_skus(skus_sheet, products)
     images_by_product_id = _read_images(images_sheet, set(products))
 
     return [
@@ -80,7 +91,13 @@ def _read_products(sheet: Any) -> dict[str, dict[str, Any]]:
     rows = _read_rows(
         sheet,
         required=("product_id", "title", "category"),
-        optional=("description",),
+        optional=(
+            "description",
+            "default_price",
+            "default_single_price",
+            "default_reference_price",
+            "default_stock",
+        ),
     )
     products: dict[str, dict[str, Any]] = {}
     errors: list[str] = []
@@ -97,6 +114,10 @@ def _read_products(sheet: Any) -> dict[str, dict[str, Any]]:
             "title": _text(row.get("title")),
             "category": _text(row.get("category")),
             "description": _text(row.get("description")),
+            "default_price": row.get("default_price"),
+            "default_single_price": row.get("default_single_price"),
+            "default_reference_price": row.get("default_reference_price"),
+            "default_stock": row.get("default_stock"),
         }
 
     if errors:
@@ -106,29 +127,40 @@ def _read_products(sheet: Any) -> dict[str, dict[str, Any]]:
     return products
 
 
-def _read_skus(sheet: Any, product_ids: set[str]) -> dict[str, list[dict[str, Any]]]:
+def _read_skus(sheet: Any, products: dict[str, dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     rows = _read_rows(
         sheet,
-        required=("product_id", "sku_name", "price", "stock"),
-        optional=("single_price", "reference_price"),
+        required=("product_id",),
+        optional=("sku_name", "color", "size", "price", "single_price", "reference_price", "stock"),
     )
+    product_ids = set(products)
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     errors: list[str] = []
     for row_number, row in rows:
-        product_id = _text(row.get("product_id"))
-        if not product_id:
+        product_id = _resolve_related_product_id(row.get("product_id"), products)
+        if product_id is None:
             errors.append(f"{sheet.title} row {row_number}: 商品编号 is required")
             continue
         if product_id not in product_ids:
             errors.append(f"{sheet.title} row {row_number}: unknown 商品编号: {product_id}")
             continue
+        attributes = _sku_attributes(row)
+        name = _text(row.get("sku_name")) or _sku_name_from_attributes(attributes)
+        if not name:
+            errors.append(f"{sheet.title} row {row_number}: SKU名称 or at least one SKU attribute is required")
+            continue
+        product = products[product_id]
         grouped[product_id].append(
             {
-                "name": _text(row.get("sku_name")),
-                "price": _text(row.get("price")),
-                "single_price": _text(row.get("single_price")),
-                "reference_price": _text(row.get("reference_price")),
-                "stock": row.get("stock"),
+                "name": name,
+                "attributes": attributes,
+                "price": _value_or_default(row.get("price"), product.get("default_price")),
+                "single_price": _value_or_default(row.get("single_price"), product.get("default_single_price")),
+                "reference_price": _value_or_default(
+                    row.get("reference_price"),
+                    product.get("default_reference_price"),
+                ),
+                "stock": _value_or_default(row.get("stock"), product.get("default_stock"), DEFAULT_XLSX_STOCK),
             }
         )
 
@@ -141,13 +173,14 @@ def _read_images(sheet: Any, product_ids: set[str]) -> dict[str, list[dict[str, 
     rows = _read_rows(
         sheet,
         required=("product_id", "image_role", "image_path"),
-        optional=(),
+        optional=("image_sku_attribute", "image_sku_value"),
     )
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    products = {product_id: {} for product_id in product_ids}
     errors: list[str] = []
     for row_number, row in rows:
-        product_id = _text(row.get("product_id"))
-        if not product_id:
+        product_id = _resolve_related_product_id(row.get("product_id"), products)
+        if product_id is None:
             errors.append(f"{sheet.title} row {row_number}: 商品编号 is required")
             continue
         if product_id not in product_ids:
@@ -157,6 +190,8 @@ def _read_images(sheet: Any, product_ids: set[str]) -> dict[str, list[dict[str, 
             {
                 "path": _text(row.get("image_path")),
                 "role": _text(row.get("image_role")) or "gallery",
+                "sku_attribute": _text(row.get("image_sku_attribute")),
+                "sku_value": _text(row.get("image_sku_value")),
             }
         )
 
@@ -225,3 +260,35 @@ def _text(value: Any) -> str:
 
 def _is_empty_row(values: tuple[Any, ...]) -> bool:
     return all(_text(value) == "" for value in values)
+
+
+def _resolve_related_product_id(value: Any, products: dict[str, dict[str, Any]]) -> str | None:
+    product_id = _text(value)
+    if product_id:
+        return product_id
+    if len(products) == 1:
+        return next(iter(products))
+    return None
+
+
+def _sku_attributes(row: dict[str, Any]) -> dict[str, str]:
+    attributes: dict[str, str] = {}
+    color = _text(row.get("color"))
+    size = _text(row.get("size"))
+    if color:
+        attributes["颜色分类"] = color
+    if size:
+        attributes["鞋码"] = size
+    return attributes
+
+
+def _sku_name_from_attributes(attributes: dict[str, str]) -> str:
+    return " ".join(attributes.values())
+
+
+def _value_or_default(value: Any, default: Any, fallback: Any = "") -> Any:
+    if _text(value) != "":
+        return value
+    if _text(default) != "":
+        return default
+    return fallback

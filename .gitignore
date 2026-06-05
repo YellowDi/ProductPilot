@@ -8,4 +8,4 @@ dist/
 build/
 artifacts/
 profiles/
-
+.DS_Store

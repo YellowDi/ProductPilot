@@ -18,37 +18,42 @@ Image filenames inside the workbook are resolved relative to the directory conta
 
 ## XLSX Workbook
 
-The workbook has three sheets. Sheet and column names are fixed.
+The workbook requires three import sheets. Sheet and column names are fixed. Extra helper sheets such as `填写说明`, `商品属性`, and `SKU原始文本` are allowed and ignored by the importer.
 
 ### 商品
 
-| 商品编号 | 商品标题 | 类目路径 | 商品描述 |
-| --- | --- | --- | --- |
-| SKU06 | UNITY优妮蒂男鞋低帮板鞋舒适休闲鞋 | 流行男鞋 > 低帮鞋 > 板鞋 | Optional internal note or future detail text. |
+| 商品编号 | 商品标题 | 类目路径 | 商品描述 | 默认拼单价 | 默认单买价 | 默认参考价 | 默认库存 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SKU06 | UNITY优妮蒂男鞋低帮板鞋舒适休闲鞋 | 流行男鞋 > 低帮鞋 > 板鞋 | Optional internal note or future detail text. | 146.64 |  |  | 20 |
 
 ### SKU
 
-| 商品编号 | SKU名称 | 拼单价 | 单买价 | 参考价 | 库存 |
-| --- | --- | --- | --- | --- | --- |
-| SKU06 | 41 | 29.90 | 39.90 | 99.00 | 8 |
-| SKU06 | 42 | 29.90 | 39.90 | 99.00 | 10 |
+| 商品编号 | 颜色分类 | 鞋码 | SKU名称 | 拼单价 | 单买价 | 参考价 | 库存 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SKU06 | 黑色 | 38 |  |  |  |  |  |
+|  | 黑色 | 39 |  |  |  |  |  |
+|  | 棕色 | 38 |  |  |  |  |  |
+
+For one-product workbooks, `商品编号` may be left blank in `SKU` and `图片` rows after the first row; ProductPilot treats blank values as the only product in the workbook. `SKU名称` may be left blank when `颜色分类` and/or `鞋码` are present; ProductPilot generates it from those attributes. Blank SKU price/stock cells inherit the matching `商品` default values. If both SKU stock and `默认库存` are blank, XLSX import uses `1000`.
 
 ### 图片
 
-| 商品编号 | 图片角色 | 图片文件名 |
-| --- | --- | --- |
-| SKU06 | main | main.jpg |
-| SKU06 | detail | detail-01.jpg |
-| SKU06 | detail | detail-02.jpg |
-| SKU06 | sku | sku.jpg |
+| 商品编号 | 图片角色 | 图片文件名 | SKU属性 | SKU值 |
+| --- | --- | --- | --- | --- |
+| SKU06 | main | main-01.jpg |  |  |
+|  | main | main-02.jpg |  |  |
+|  | detail | detail-01.jpg |  |  |
+|  | detail | detail-02.jpg |  |  |
+|  | sku | sku-black.jpg | 颜色分类 | 黑色 |
+|  | sku | sku-brown.jpg | 颜色分类 | 棕色 |
 
-`商品编号` is the join key across all three sheets. Do not merge cells or rename columns. Multiple detail/gallery images should use one row per image; upload order follows the row order in the `图片` sheet.
+`商品编号` is the join key across all three sheets. Do not merge cells or rename columns. Multiple main/detail/gallery images should use one row per image; upload order follows the row order in the `图片` sheet. For SKU images, bind one image to one SKU attribute value, such as `SKU属性=颜色分类` and `SKU值=黑色`; that image applies to all SKUs whose `颜色分类` is `黑色`.
 
 English sheet names and headers are also accepted for developer fixtures:
 
 - `Products`: `product_id`, `title`, `category`, `description`
-- `SKUs`: `product_id`, `sku_name`, `price`, `single_price`, `reference_price`, `stock`
-- `Images`: `product_id`, `image_role`, `image_path`
+- `SKUs`: `product_id`, `color`, `size`, `sku_name`, `price`, `single_price`, `reference_price`, `stock`
+- `Images`: `product_id`, `image_role`, `image_path`, `sku_attribute`, `sku_value`
 
 ## JSON Debug Format
 
@@ -76,7 +81,11 @@ products/
   "description": "Optional internal note or future detail text.",
   "images": [
     {
-      "path": "images/main.jpg",
+      "path": "images/main-01.jpg",
+      "role": "main"
+    },
+    {
+      "path": "images/main-02.jpg",
       "role": "main"
     },
     {
@@ -84,8 +93,10 @@ products/
       "role": "detail"
     },
     {
-      "path": "images/sku.jpg",
-      "role": "sku"
+      "path": "images/sku-black.jpg",
+      "role": "sku",
+      "sku_attribute": "颜色分类",
+      "sku_value": "黑色"
     }
   ],
   "skus": [
@@ -106,15 +117,18 @@ products/
 - `title`: required, max 60 characters.
 - `category`: required, use ` > ` between category levels.
 - `description`: optional string. Current automation does not depend on it.
+- `默认拼单价`, `默认单买价`, `默认参考价`, `默认库存`: optional product-level defaults used when matching SKU cells are blank. If XLSX SKU stock and `默认库存` are both blank, stock defaults to `1000`.
 - `images`: required, at least one item with role `main`.
 - `images[].path` / `图片文件名`: required filename or relative file path. Relative paths are resolved from the XLSX workbook directory or the `product.json` directory.
 - `images[].role`: one of `main`, `gallery`, `detail`, `sku`.
+- `SKU属性`, `SKU值`: optional for `sku` images, used to bind a SKU image to a structured SKU attribute value. If either is filled, both are required.
 - `skus`: required, at least one SKU.
-- `skus[].name`: required SKU option text, such as shoe size `41`.
+- `skus[].name` / `SKU名称`: required unless `颜色分类` or `鞋码` is filled.
+- `颜色分类`, `鞋码`: optional structured SKU attributes. Use these for color-size SKU grids.
 - `skus[].price`: required 拼单价, decimal string, greater than 0.
 - `skus[].single_price`: optional 单买价, decimal string, greater than 0. Defaults to `price` in the current spike if omitted.
 - `skus[].reference_price`: optional 划线价/参考价, decimal string, greater than the effective single price.
-- `skus[].stock`: required integer, greater than or equal to 0.
+- `skus[].stock`: required integer, greater than or equal to 0. XLSX imports default blank stock to `1000`.
 
 ## Validation
 

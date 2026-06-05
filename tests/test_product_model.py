@@ -68,6 +68,39 @@ class ProductDraftTests(unittest.TestCase):
 
         self.assertIn("images[1].image.path is required", product.validate())
 
+    def test_validates_sku_image_binding(self) -> None:
+        product = ProductDraft.from_mapping(
+            {
+                "title": "Test Product",
+                "category": "default-category",
+                "images": [
+                    {"path": "images/main.jpg", "role": "main"},
+                    {
+                        "path": "images/black.jpg",
+                        "role": "sku",
+                        "sku_attribute": "颜色分类",
+                        "sku_value": "黑色",
+                    },
+                    {
+                        "path": "images/detail.jpg",
+                        "role": "detail",
+                        "sku_attribute": "颜色分类",
+                        "sku_value": "黑色",
+                    },
+                    {
+                        "path": "images/brown.jpg",
+                        "role": "sku",
+                        "sku_attribute": "颜色分类",
+                    },
+                ],
+                "skus": [{"name": "default", "price": "19.90", "stock": 10}],
+            }
+        )
+
+        errors = product.validate()
+        self.assertIn("images[3].image sku binding is only allowed for sku images", errors)
+        self.assertIn("images[4].image sku binding requires both sku_attribute and sku_value", errors)
+
     def test_rejects_invalid_sku_values(self) -> None:
         product = ProductDraft.from_mapping(
             {

@@ -29,6 +29,8 @@ python3 -B -m product_pilot.cli validate examples/product.valid.json
 
 The delivery product input is an XLSX workbook. JSON remains available as a developer/debug format. Both are documented in `docs/product-input-spec.md`.
 
+A multi-SKU starter workbook is available at `examples/product-template/product-input-multisku.xlsx`.
+
 ## Browser Login Check
 
 Install the browser automation dependency first:
