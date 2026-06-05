@@ -44,6 +44,15 @@ def select_category(page: Any, path: tuple[str, ...]) -> CategorySelectionResult
         )
 
     notes.append("recommendation modal not found or target category not present")
+    if select_recent_category(page, target):
+        notes.append(f"selected recent category: {target}")
+        return CategorySelectionResult(
+            path=path,
+            selected_from_recommendation=False,
+            confirmed=True,
+            notes=notes,
+        )
+
     for part in path:
         page.locator("li.content-cat").filter(has_text=part).first.click(timeout=10_000)
         page.wait_for_timeout(800)
@@ -92,6 +101,36 @@ def select_recommended_category(page: Any, target: str) -> bool:
     return True
 
 
+def select_recent_category(page: Any, target: str) -> bool:
+    clicked = page.evaluate(
+        """target => {
+            const compact = value => String(value || "").replace(/\\s+/g, " ").trim();
+            const normalize = value => compact(value).replace(/\\s*>\\s*/g, ">");
+            const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+            const targetText = normalize(target);
+            const candidates = Array.from(document.querySelectorAll("a, button, label, span, div, li"))
+                .filter(el => {
+                    if (!visible(el)) return false;
+                    const text = normalize(el.innerText || el.textContent);
+                    return text.includes(targetText) && text.length <= targetText.length + 20;
+                });
+            if (!candidates.length) {
+                return false;
+            }
+            const exact = candidates.find(el => normalize(el.innerText || el.textContent) === targetText);
+            const candidate = exact || candidates[0];
+            const clickable = candidate.closest("a, button, label, [role='button'], li") || candidate;
+            clickable.click();
+            return true;
+        }""",
+        target,
+    )
+    if not clicked:
+        return False
+    page.wait_for_timeout(1_000)
+    return True
+
+
 def click_next_product_info(page: Any, notes: list[str], *, timeout: int = 10_000) -> None:
     dismiss_blocking_modals(page, notes)
     try:
@@ -102,6 +141,7 @@ def click_next_product_info(page: Any, notes: list[str], *, timeout: int = 10_00
         if not dismiss_blocking_modals(page, notes):
             raise
         page.get_by_text("下一步, 完善商品信息", exact=True).click(timeout=timeout)
+    page.get_by_placeholder("商品标题组成").wait_for(timeout=timeout)
 
 
 def dismiss_blocking_modals(page: Any, notes: list[str]) -> bool:
