@@ -71,7 +71,22 @@ def select_recommended_category(page: Any, target: str) -> bool:
     if target not in body_text:
         return False
 
-    page.locator(".catPredictAlert_multiLabel__UwvmJ").filter(has_text=target).first.click(timeout=10_000)
+    clicked = page.evaluate(
+        """target => {
+            const compact = value => (value || "").replace(/\\s+/g, " ").trim();
+            const optionText = Array.from(document.querySelectorAll(".catPredictAlert_multiLabel__UwvmJ"))
+                .find(el => compact(el.innerText || el.textContent) === target);
+            if (!optionText) {
+                return false;
+            }
+            const label = optionText.closest("label");
+            (label || optionText).click();
+            return true;
+        }""",
+        target,
+    )
+    if not clicked:
+        return False
     page.get_by_role("button", name="确认").click(timeout=10_000)
     page.wait_for_timeout(2_000)
     return True

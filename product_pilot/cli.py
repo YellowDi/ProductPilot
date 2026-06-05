@@ -17,6 +17,7 @@ from product_pilot.automation.browser import (
 from product_pilot.automation.category import DEFAULT_CATEGORY_PATH, format_category_path, parse_category_path, select_category
 from product_pilot.automation.draft import (
     DraftSpikeData,
+    DraftSkuData,
     detect_draft_saved,
     fill_minimal_draft_fields,
     draft_data_from_product,
@@ -120,6 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Pause after opening the page for manual login or risk checks before upload.",
     )
+    draft_parser.add_argument("--no-save", action="store_true", help="Fill fields but do not click save draft.")
     draft_parser.add_argument("--keep-open", action="store_true", help="Keep browser open after printing results.")
 
     return parser
@@ -395,10 +397,7 @@ def draft_spike(args: argparse.Namespace) -> int:
     )
     data = DraftSpikeData(
         title=args.title or default_draft.title,
-        size=args.size or default_draft.size,
-        stock=args.stock if args.stock is not None else default_draft.stock,
-        group_price=Decimal(str(args.group_price if args.group_price is not None else default_draft.group_price)),
-        single_price=Decimal(str(args.single_price if args.single_price is not None else default_draft.single_price)),
+        skus=_resolve_draft_skus(args, default_draft),
         reference_price=Decimal(
             str(args.reference_price if args.reference_price is not None else default_draft.reference_price)
         ),
@@ -438,8 +437,12 @@ def draft_spike(args: argparse.Namespace) -> int:
             session.wait(8_000)
 
             notes.extend(fill_minimal_draft_fields(session.page, data))
-            notes.extend(save_draft(session.page))
-            saved = detect_draft_saved(session.page)
+            if args.no_save:
+                notes.append("save skipped by --no-save")
+                saved = False
+            else:
+                notes.extend(save_draft(session.page))
+                saved = detect_draft_saved(session.page)
             screenshot_path = session.take_screenshot("draft-spike")
             output_path = screenshot_path.with_suffix(".json")
             output_path.write_text(
@@ -447,6 +450,7 @@ def draft_spike(args: argparse.Namespace) -> int:
                     {
                         "url": session.page.url,
                         "saved": saved,
+                        "no_save": args.no_save,
                         "notes": notes,
                         "screenshot_path": str(screenshot_path),
                     },
@@ -469,7 +473,24 @@ def draft_spike(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
-    return 0 if saved else 1
+    return 0 if saved or args.no_save else 1
+
+
+def _resolve_draft_skus(args: argparse.Namespace, default_draft: DraftSpikeData) -> tuple[DraftSkuData, ...]:
+    if any(value is not None for value in (args.size, args.stock, args.group_price, args.single_price)):
+        first_sku = default_draft.skus[0]
+        return (
+            DraftSkuData(
+                size=args.size or first_sku.size,
+                stock=args.stock if args.stock is not None else first_sku.stock,
+                group_price=Decimal(str(args.group_price if args.group_price is not None else first_sku.group_price)),
+                single_price=Decimal(
+                    str(args.single_price if args.single_price is not None else first_sku.single_price)
+                ),
+            ),
+        )
+
+    return default_draft.skus
 
 
 if __name__ == "__main__":

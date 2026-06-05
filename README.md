@@ -80,9 +80,15 @@ Save the current test product to the draft box:
 python3 -m product_pilot.cli draft-spike --product examples/product.sku06.json --keep-open
 ```
 
-The product JSON provides the title, category, main image, size, stock, group price, single price, and reference price. CLI flags can still override individual values for one-off tests.
+The product JSON provides the title, category, main image, SKU sizes, stock, group price, single price, and reference price. CLI flags can still override individual values for one-off tests.
 
 This command can click `保存草稿`. It never clicks `提交并上架`.
+
+Verify field filling without saving:
+
+```bash
+python3 -m product_pilot.cli draft-spike --product examples/product.sku06.json --no-save --keep-open
+```
 
 ## Quick Check
 

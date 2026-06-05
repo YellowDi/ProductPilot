@@ -11,12 +11,17 @@ from product_pilot.domain.product import ProductDraft, ProductImage, ProductSku
 
 
 @dataclass(frozen=True)
-class DraftSpikeData:
-    title: str = "UNITY优妮蒂男鞋低帮板鞋舒适休闲鞋"
+class DraftSkuData:
     size: str = "42"
     stock: int = 10
     group_price: Decimal = Decimal("29.90")
     single_price: Decimal = Decimal("39.90")
+
+
+@dataclass(frozen=True)
+class DraftSpikeData:
+    title: str = "UNITY优妮蒂男鞋低帮板鞋舒适休闲鞋"
+    skus: tuple[DraftSkuData, ...] = (DraftSkuData(),)
     reference_price: Decimal = Decimal("99.00")
 
 
@@ -37,15 +42,11 @@ class DraftSpikeResult:
 
 
 def draft_data_from_product(product: ProductDraft) -> DraftSpikeData:
-    sku = _primary_sku(product)
-    single_price = sku.single_price if sku.single_price is not None else sku.price
-    reference_price = sku.reference_price if sku.reference_price is not None else single_price + Decimal("1.00")
+    skus = tuple(_draft_sku_from_product_sku(sku) for sku in product.skus)
+    reference_price = max(_reference_price_for_product_sku(sku) for sku in product.skus)
     return DraftSpikeData(
         title=product.title,
-        size=sku.name,
-        stock=sku.stock,
-        group_price=sku.price,
-        single_price=single_price,
+        skus=skus,
         reference_price=reference_price,
     )
 
@@ -67,15 +68,15 @@ def fill_minimal_draft_fields(page: Any, data: DraftSpikeData) -> list[str]:
     page.get_by_placeholder("商品标题组成").fill(data.title)
     notes.append("filled title")
 
-    click_label_by_exact_text(page, data.size)
-    notes.append(f"selected size: {data.size}")
+    sorted_skus = sort_skus_for_page(data.skus)
+    for sku in sorted_skus:
+        click_label_by_exact_text(page, sku.size)
+    notes.append(f"selected sizes: {', '.join(sku.size for sku in sorted_skus)}")
     page.wait_for_timeout(2_000)
 
-    fill_first_placeholder(page, "库存", str(data.stock))
-    fill_first_placeholder(page, "拼单价", _format_decimal(data.group_price))
-    fill_first_placeholder(page, "单买价", _format_decimal(data.single_price))
+    fill_sku_table(page, sorted_skus)
     fill_first_placeholder(page, "应大于商品最大单买价", _format_decimal(data.reference_price))
-    notes.append("filled stock and prices")
+    notes.append("filled sku stock and prices")
 
     return notes
 
@@ -142,15 +143,64 @@ def click_label_by_exact_text(page: Any, text: str) -> None:
     )
 
 
+def fill_sku_table(page: Any, skus: tuple[DraftSkuData, ...]) -> None:
+    stock_inputs = page.get_by_placeholder("库存")
+    group_price_inputs = page.get_by_placeholder("拼单价")
+    single_price_inputs = page.get_by_placeholder("单买价")
+
+    if stock_inputs.count() < len(skus):
+        fill_batch_sku_values(page, skus[0])
+        return
+
+    if group_price_inputs.count() < len(skus):
+        raise ValueError(f"expected at least {len(skus)} group price inputs, found {group_price_inputs.count()}")
+    if single_price_inputs.count() < len(skus):
+        raise ValueError(f"expected at least {len(skus)} single price inputs, found {single_price_inputs.count()}")
+
+    for index, sku in enumerate(skus):
+        stock_inputs.nth(index).fill(str(sku.stock))
+        group_price_inputs.nth(index).fill(_format_decimal(sku.group_price))
+        single_price_inputs.nth(index).fill(_format_decimal(sku.single_price))
+
+
+def fill_batch_sku_values(page: Any, sku: DraftSkuData) -> None:
+    fill_first_placeholder(page, "库存", str(sku.stock))
+    fill_first_placeholder(page, "拼单价", _format_decimal(sku.group_price))
+    fill_first_placeholder(page, "单买价", _format_decimal(sku.single_price))
+    page.wait_for_timeout(500)
+    page.get_by_role("button", name="批量设置").click(timeout=8_000)
+    page.wait_for_timeout(1_500)
+
+
 def fill_first_placeholder(page: Any, placeholder: str, value: str) -> None:
     page.get_by_placeholder(placeholder).first.fill(value)
+
+
+def sort_skus_for_page(skus: tuple[DraftSkuData, ...]) -> tuple[DraftSkuData, ...]:
+    return tuple(sorted(skus, key=lambda sku: _size_sort_key(sku.size)))
 
 
 def _format_decimal(value: Decimal) -> str:
     return f"{value:.2f}"
 
 
-def _primary_sku(product: ProductDraft) -> ProductSku:
-    if not product.skus:
-        raise ValueError("product has no sku")
-    return product.skus[0]
+def _draft_sku_from_product_sku(sku: ProductSku) -> DraftSkuData:
+    single_price = sku.single_price if sku.single_price is not None else sku.price
+    return DraftSkuData(
+        size=sku.name,
+        stock=sku.stock,
+        group_price=sku.price,
+        single_price=single_price,
+    )
+
+
+def _reference_price_for_product_sku(sku: ProductSku) -> Decimal:
+    single_price = sku.single_price if sku.single_price is not None else sku.price
+    return sku.reference_price if sku.reference_price is not None else single_price + Decimal("1.00")
+
+
+def _size_sort_key(size: str) -> tuple[int, Decimal | str]:
+    try:
+        return (0, Decimal(size))
+    except Exception:
+        return (1, size)
