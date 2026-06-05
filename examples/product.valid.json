@@ -4,11 +4,11 @@
   "description": "Example product draft for local validation.",
   "images": [
     {
-      "path": "images/main.jpg",
+      "path": "../SKU06.jpg",
       "role": "main"
     },
     {
-      "path": "images/detail.jpg",
+      "path": "../SKU06.jpg",
       "role": "detail"
     }
   ],
@@ -20,4 +20,3 @@
     }
   ]
 }
-

@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Local browser automation for preparing Pinduoduo product listings."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+  "openpyxl>=3.1",
+]
 
 [project.optional-dependencies]
 automation = [
@@ -29,4 +31,3 @@ product-pilot = "product_pilot.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-

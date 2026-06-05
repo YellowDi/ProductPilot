@@ -30,14 +30,15 @@ from product_pilot.automation.field_scan import scan_publish_fields
 from product_pilot.automation.login import LoginState
 from product_pilot.automation.publish import PublishPageState
 from product_pilot.domain.product import ProductDraft
+from product_pilot.importers.xlsx import ProductWorkbookError, load_products_from_xlsx
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="product-pilot")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    validate_parser = subparsers.add_parser("validate", help="Validate a product draft JSON file.")
-    validate_parser.add_argument("path", type=Path, help="Path to a product draft JSON file.")
+    validate_parser = subparsers.add_parser("validate", help="Validate a product draft JSON or XLSX file.")
+    validate_parser.add_argument("path", type=Path, help="Path to a product draft JSON or XLSX file.")
 
     browser_parser = subparsers.add_parser(
         "browser-check",
@@ -150,11 +151,12 @@ def add_browser_arguments(parser: argparse.ArgumentParser, *, default_url: str, 
 
 
 def validate_product(path: Path) -> int:
-    product = load_product_file(path)
-    if product is None:
+    products = load_products_file(path)
+    if products is None:
         return 2
 
-    errors = product.validate()
+    base_dir = path.resolve().parent
+    errors = validate_loaded_products(products, base_dir)
     if errors:
         for error in errors:
             print(error, file=sys.stderr)
@@ -164,7 +166,17 @@ def validate_product(path: Path) -> int:
     return 0
 
 
-def load_product_file(path: Path) -> ProductDraft | None:
+def load_products_file(path: Path) -> list[ProductDraft] | None:
+    if path.suffix.lower() == ".xlsx":
+        try:
+            return load_products_from_xlsx(path)
+        except ProductWorkbookError as exc:
+            print(str(exc), file=sys.stderr)
+            return None
+    if path.suffix.lower() != ".json":
+        print(f"unsupported product file type: {path.suffix or '<none>'}", file=sys.stderr)
+        return None
+
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -174,7 +186,49 @@ def load_product_file(path: Path) -> ProductDraft | None:
         print(f"invalid json: {exc}", file=sys.stderr)
         return None
 
-    return ProductDraft.from_mapping(payload)
+    return [ProductDraft.from_mapping(payload)]
+
+
+def load_product_file(path: Path) -> ProductDraft | None:
+    products = load_products_file(path)
+    if products is None:
+        return None
+    if len(products) != 1:
+        print(f"expected exactly one product, found {len(products)}", file=sys.stderr)
+        return None
+    return products[0]
+
+
+def validate_loaded_products(products: list[ProductDraft], base_dir: Path) -> list[str]:
+    errors: list[str] = []
+    for index, product in enumerate(products, start=1):
+        product_errors = product.validate()
+        product_errors.extend(validate_product_assets(product, base_dir))
+        if len(products) == 1:
+            errors.extend(product_errors)
+        else:
+            label = product.product_id or str(index)
+            errors.extend(f"products[{label}].{error}" for error in product_errors)
+    return errors
+
+
+def validate_product_assets(product: ProductDraft, base_dir: Path) -> list[str]:
+    errors: list[str] = []
+    for index, image in enumerate(product.images, start=1):
+        if str(image.path) in {"", "."}:
+            continue
+        image_path = resolve_product_asset_path(base_dir, image.path)
+        if not image_path.exists():
+            errors.append(f"images[{index}].image.path file not found: {image_path}")
+        elif not image_path.is_file():
+            errors.append(f"images[{index}].image.path is not a file: {image_path}")
+    return errors
+
+
+def resolve_product_asset_path(base_dir: Path, path: Path) -> Path:
+    if path.is_absolute():
+        return path
+    return (base_dir / path).resolve()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -373,12 +427,17 @@ def draft_spike(args: argparse.Namespace) -> int:
                 print(error, file=sys.stderr)
             return 1
         product_base_dir = args.product.resolve().parent
+        asset_errors = validate_product_assets(product, product_base_dir)
+        if asset_errors:
+            for error in asset_errors:
+                print(error, file=sys.stderr)
+            return 2
         default_draft = draft_data_from_product(product)
 
     if args.main_image is not None:
         main_image = args.main_image
     elif product is not None:
-        main_image = product_base_dir / main_image_from_product(product).path
+        main_image = resolve_product_asset_path(product_base_dir, main_image_from_product(product).path)
     else:
         print("main image is required unless --product is provided", file=sys.stderr)
         return 2
@@ -391,19 +450,14 @@ def draft_spike(args: argparse.Namespace) -> int:
     sku_image: Path | None = None
     if product is not None:
         detail_images = tuple(
-            (product_base_dir / image.path).resolve()
+            resolve_product_asset_path(product_base_dir, image.path)
             for image in images_from_product(product, "detail")
         )
         sku_images = tuple(
-            (product_base_dir / image.path).resolve()
+            resolve_product_asset_path(product_base_dir, image.path)
             for image in images_from_product(product, "sku")
         )
         sku_image = sku_images[0] if sku_images else None
-        missing_images = [path for path in (*detail_images, *(sku_images[:1])) if not path.exists()]
-        if missing_images:
-            for path in missing_images:
-                print(f"image not found: {path}", file=sys.stderr)
-            return 2
 
     config = BrowserLaunchConfig(
         backend_url=args.url,

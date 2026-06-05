@@ -17,9 +17,17 @@ Implemented so far:
 
 ## Product Validation
 
+Install project dependencies first:
+
+```bash
+python3 -m pip install -e .
+```
+
 ```bash
 python3 -B -m product_pilot.cli validate examples/product.valid.json
 ```
+
+The delivery product input is an XLSX workbook. JSON remains available as a developer/debug format. Both are documented in `docs/product-input-spec.md`.
 
 ## Browser Login Check
 

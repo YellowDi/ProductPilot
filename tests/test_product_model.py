@@ -56,6 +56,18 @@ class ProductDraftTests(unittest.TestCase):
 
         self.assertIn("at least one main image is required", product.validate())
 
+    def test_requires_image_path(self) -> None:
+        product = ProductDraft.from_mapping(
+            {
+                "title": "Test Product",
+                "category": "default-category",
+                "images": [{"path": "", "role": "main"}],
+                "skus": [{"name": "default", "price": "19.90", "stock": 10}],
+            }
+        )
+
+        self.assertIn("images[1].image.path is required", product.validate())
+
     def test_rejects_invalid_sku_values(self) -> None:
         product = ProductDraft.from_mapping(
             {

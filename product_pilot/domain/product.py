@@ -22,7 +22,7 @@ class ProductImage:
 
     def validate(self) -> list[str]:
         errors: list[str] = []
-        if not str(self.path):
+        if str(self.path) in {"", "."}:
             errors.append("image.path is required")
         if self.role not in {"main", "gallery", "detail", "sku"}:
             errors.append(f"image.role must be one of main, gallery, detail, sku: {self.role}")
@@ -70,6 +70,7 @@ class ProductSku:
 class ProductDraft:
     title: str
     category: str
+    product_id: str = ""
     images: list[ProductImage] = field(default_factory=list)
     skus: list[ProductSku] = field(default_factory=list)
     description: str = ""
@@ -82,6 +83,7 @@ class ProductDraft:
         return cls(
             title=str(payload.get("title", "")).strip(),
             category=str(payload.get("category", "")).strip(),
+            product_id=str(payload.get("product_id", "")).strip(),
             description=str(payload.get("description", "")).strip(),
             images=[
                 ProductImage.from_mapping(item)
