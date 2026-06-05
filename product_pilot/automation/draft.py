@@ -38,6 +38,7 @@ class DraftSpikeData:
     title: str = "UNITY优妮蒂男鞋低帮板鞋舒适休闲鞋"
     skus: tuple[DraftSkuData, ...] = (DraftSkuData(),)
     reference_price: Decimal = Decimal("99.00")
+    product_code: str = ""
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,7 @@ def draft_data_from_product(product: ProductDraft) -> DraftSpikeData:
         title=product.title,
         skus=skus,
         reference_price=reference_price,
+        product_code=product.product_code,
     )
 
 
@@ -132,6 +134,11 @@ def fill_minimal_draft_fields(
 
     sku_fill_method = fill_sku_table(page, sorted_skus)
     fill_first_placeholder(page, "应大于商品最大单买价", _format_decimal(data.reference_price))
+    if data.product_code:
+        if fill_product_code(page, data.product_code):
+            notes.append("filled product code")
+        else:
+            notes.append("product code input not found")
     notes.append(f"filled sku stock and prices via {sku_fill_method}")
 
     return notes
@@ -155,7 +162,7 @@ def upload_extra_images(
             page.locator("input[type=file]").nth(main_target.file_input_index).set_input_files(
                 [str(path) for path in main_images]
             )
-            page.wait_for_timeout(2_000)
+            wait_for_uploads_to_settle(page)
             notes.append(f"uploaded extra main images: {len(main_images)}")
 
     if detail_images:
@@ -166,7 +173,7 @@ def upload_extra_images(
             page.locator("input[type=file]").nth(detail_target.file_input_index).set_input_files(
                 [str(path) for path in detail_images]
             )
-            page.wait_for_timeout(2_000)
+            wait_for_uploads_to_settle(page)
             notes.append(f"uploaded detail images: {len(detail_images)}")
 
     if sku_images:
@@ -188,6 +195,7 @@ def upload_extra_images(
                 else:
                     uploaded_count += 1
                     page.wait_for_timeout(700)
+            wait_for_uploads_to_settle(page)
             notes.append(f"uploaded sku images: {uploaded_count}/{len(sku_images)}")
             if len(sku_targets) != len(sku_images):
                 notes.append(f"sku image target count differs from image count: {len(sku_targets)}/{len(sku_images)}")
@@ -415,6 +423,7 @@ def fill_color_sku_options(
             else:
                 uploaded_count += 1
                 page.wait_for_timeout(700)
+        wait_for_uploads_to_settle(page)
 
     notes.append(f"processed color sku options: {created_count}/{len(values)}")
     if image_by_value:
@@ -441,6 +450,46 @@ def color_sku_upload_targets(targets: list[UploadTarget], *, expected_count: int
         )
     ]
     return sorted(candidates, key=lambda target: (int(target.top // 20), target.left))[:expected_count]
+
+
+def wait_for_uploads_to_settle(page: Any, *, timeout_ms: int = 60_000) -> bool:
+    try:
+        page.wait_for_function(
+            """() => {
+                const compact = value => String(value || "").replace(/\\s+/g, " ").trim();
+                const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+                const bodyText = compact(document.body ? document.body.innerText : "");
+                const pendingMarkers = ["上传中", "正在上传", "上传图片中", "图片上传中", "处理中"];
+                if (pendingMarkers.some(marker => bodyText.includes(marker))) {
+                    return false;
+                }
+                const busySelectors = [
+                    "[aria-busy='true']",
+                    "[class*='progress']",
+                    "[class*='Progress']",
+                    "[class*='uploading']",
+                    "[class*='Uploading']",
+                    "[class*='spin']",
+                    "[class*='Spin']",
+                    "[class*='loading']",
+                    "[class*='Loading']"
+                ];
+                return !Array.from(document.querySelectorAll(busySelectors.join(","))).some(el => {
+                    const text = compact(el.innerText || el.textContent || el.className || "");
+                    return visible(el) && (
+                        text.includes("上传") ||
+                        text.includes("加载") ||
+                        text.includes("处理") ||
+                        String(el.getAttribute("aria-busy") || "") === "true"
+                    );
+                });
+            }""",
+            timeout=timeout_ms,
+        )
+    except Exception:
+        return False
+    page.wait_for_timeout(3_000)
+    return True
 
 
 def select_or_create_color_sku_option(page: Any, value: str) -> None:
@@ -503,6 +552,60 @@ def click_visible_dropdown_option(page: Any, text: str) -> bool:
     ))
 
 
+def field_input_index_by_label(page: Any, label_text: str) -> int | None:
+    index = page.evaluate(
+        """target => {
+            const compact = value => String(value || "").replace(/\\s+/g, " ").trim();
+            const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+            const labelMatches = el => {
+                const text = compact(el.innerText || el.textContent);
+                const normalized = text.replace(/[＊*:：]/g, "");
+                return text === target || normalized === target;
+            };
+            const allInputs = Array.from(document.querySelectorAll("input"));
+            const eligibleInputs = root => Array.from(root.querySelectorAll("input"))
+                .filter(el => (
+                    visible(el) &&
+                    String(el.type || "").toLowerCase() !== "file" &&
+                    String(el.type || "").toLowerCase() !== "hidden" &&
+                    !el.disabled
+                ));
+            const firstInputIndex = root => {
+                const inputs = eligibleInputs(root);
+                return inputs.length ? allInputs.indexOf(inputs[0]) : null;
+            };
+            const siblingInputIndex = el => {
+                let sibling = el.nextElementSibling;
+                for (let steps = 0; sibling && steps < 4; steps += 1) {
+                    const index = firstInputIndex(sibling);
+                    if (index !== null && index >= 0) return index;
+                    sibling = sibling.nextElementSibling;
+                }
+                return null;
+            };
+            const labels = Array.from(document.querySelectorAll("label, span, div"))
+                .filter(el => visible(el) && labelMatches(el));
+            for (const label of labels) {
+                let current = label;
+                for (let depth = 0; current && depth < 6; depth += 1) {
+                    const siblingIndex = siblingInputIndex(current);
+                    if (siblingIndex !== null) return siblingIndex;
+
+                    const ownIndex = firstInputIndex(current);
+                    if (ownIndex !== null && ownIndex >= 0) return ownIndex;
+
+                    const text = compact(current.innerText || current.textContent);
+                    if (text.length > 500 && depth > 1) break;
+                    current = current.parentElement;
+                }
+            }
+            return null;
+        }""",
+        label_text,
+    )
+    return int(index) if index is not None else None
+
+
 def first_sku_image_by_value(
     sku_images: tuple[SkuImageUpload, ...],
     attribute: str,
@@ -513,6 +616,14 @@ def first_sku_image_by_value(
             continue
         images.setdefault(image.sku_value, image)
     return images
+
+
+def fill_product_code(page: Any, product_code: str) -> bool:
+    input_index = field_input_index_by_label(page, "商品编码")
+    if input_index is None:
+        return False
+    page.locator("input").nth(int(input_index)).fill(product_code)
+    return True
 
 
 def fill_sku_table(page: Any, skus: tuple[DraftSkuData, ...]) -> str:

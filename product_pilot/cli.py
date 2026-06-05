@@ -32,6 +32,7 @@ from product_pilot.automation.draft import (
     main_image_from_product,
     save_draft,
     upload_extra_images,
+    wait_for_uploads_to_settle,
 )
 from product_pilot.automation.field_scan import scan_publish_fields
 from product_pilot.automation.login import LoginState
@@ -490,6 +491,7 @@ def draft_spike(args: argparse.Namespace) -> int:
         reference_price=Decimal(
             str(args.reference_price if args.reference_price is not None else default_draft.reference_price)
         ),
+        product_code=default_draft.product_code,
     )
 
     try:
@@ -511,7 +513,7 @@ def draft_spike(args: argparse.Namespace) -> int:
 
             notes: list[str] = []
             session.page.locator("input[type=file]").first.set_input_files(str(main_image))
-            session.wait(10_000)
+            wait_for_uploads_to_settle(session.page)
 
             category_value = args.category_path
             if category_value is None and product is not None:

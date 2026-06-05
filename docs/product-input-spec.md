@@ -22,9 +22,9 @@ The workbook requires three import sheets. Sheet and column names are fixed. Ext
 
 ### 商品
 
-| 商品编号 | 商品标题 | 类目路径 | 商品描述 | 默认拼单价 | 默认单买价 | 默认参考价 | 默认库存 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| SKU06 | UNITY优妮蒂男鞋低帮板鞋舒适休闲鞋 | 流行男鞋 > 低帮鞋 > 板鞋 | Optional internal note or future detail text. | 146.64 |  |  | 20 |
+| 商品编号 | 商品标题 | 类目路径 | 商品描述 | 默认拼单价 | 默认单买价 | 默认参考价 | 默认库存 | 商品编码 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| SKU06 | UNITY优妮蒂男鞋低帮板鞋舒适休闲鞋 | 流行男鞋 > 低帮鞋 > 板鞋 | Optional internal note or future detail text. | 146.64 | 188 | 299 | 20 | demo001 |
 
 ### SKU
 
@@ -51,7 +51,7 @@ For one-product workbooks, `商品编号` may be left blank in `SKU` and `图片
 
 English sheet names and headers are also accepted for developer fixtures:
 
-- `Products`: `product_id`, `title`, `category`, `description`
+- `Products`: `product_id`, `product_code`, `title`, `category`, `description`
 - `SKUs`: `product_id`, `color`, `size`, `sku_name`, `price`, `single_price`, `reference_price`, `stock`
 - `Images`: `product_id`, `image_role`, `image_path`, `sku_attribute`, `sku_value`
 
@@ -76,6 +76,7 @@ products/
 ```json
 {
   "product_id": "SKU06",
+  "product_code": "demo001",
   "title": "UNITY优妮蒂男鞋低帮板鞋舒适休闲鞋",
   "category": "流行男鞋 > 低帮鞋 > 板鞋",
   "description": "Optional internal note or future detail text.",
@@ -114,6 +115,7 @@ products/
 ## Field Rules
 
 - `product_id` / `商品编号`: required in XLSX, optional in JSON. It identifies one product and joins SKU/image rows.
+- `product_code` / `商品编码`: optional. Product spec attributes are handled by the backend `一键复用` action; current automation fills the product-level `商品编码` field separately in the price and inventory section.
 - `title`: required, max 60 characters.
 - `category`: required, use ` > ` between category levels.
 - `description`: optional string. Current automation does not depend on it.

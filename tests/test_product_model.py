@@ -11,6 +11,7 @@ class ProductDraftTests(unittest.TestCase):
             {
                 "title": "Test Product",
                 "category": "default-category",
+                "product_code": "demo001",
                 "images": [
                     {"path": "images/main.jpg", "role": "main"},
                     {"path": "images/detail.jpg", "role": "detail"},
@@ -21,6 +22,7 @@ class ProductDraftTests(unittest.TestCase):
         )
 
         self.assertEqual(product.validate(), [])
+        self.assertEqual(product.product_code, "demo001")
 
     def test_parses_optional_sku_prices(self) -> None:
         product = ProductDraft.from_mapping(

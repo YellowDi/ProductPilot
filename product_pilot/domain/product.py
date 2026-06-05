@@ -89,6 +89,7 @@ class ProductDraft:
     title: str
     category: str
     product_id: str = ""
+    product_code: str = ""
     images: list[ProductImage] = field(default_factory=list)
     skus: list[ProductSku] = field(default_factory=list)
     description: str = ""
@@ -102,6 +103,7 @@ class ProductDraft:
             title=str(payload.get("title", "")).strip(),
             category=str(payload.get("category", "")).strip(),
             product_id=str(payload.get("product_id", "")).strip(),
+            product_code=str(payload.get("product_code", "")).strip(),
             description=str(payload.get("description", "")).strip(),
             images=[
                 ProductImage.from_mapping(item)

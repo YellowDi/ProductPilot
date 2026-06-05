@@ -32,6 +32,7 @@ class ProductXlsxImporterTests(unittest.TestCase):
             self.assertEqual(len(products), 1)
             product = products[0]
             self.assertEqual(product.product_id, "SKU06")
+            self.assertEqual(product.product_code, "demo001")
             self.assertEqual(product.title, "UNITY优妮蒂男鞋低帮板鞋舒适休闲鞋")
             self.assertEqual(product.category, "流行男鞋 > 低帮鞋 > 板鞋")
             self.assertEqual([sku.name for sku in product.skus], ["41", "42"])
@@ -92,8 +93,14 @@ def _write_product_workbook(path: Path) -> None:
     workbook = Workbook()
     products = workbook.active
     products.title = "商品"
-    products.append(["商品编号", "商品标题", "类目路径", "商品描述"])
-    products.append(["SKU06", "UNITY优妮蒂男鞋低帮板鞋舒适休闲鞋", "流行男鞋 > 低帮鞋 > 板鞋", "fixture"])
+    products.append(["商品编号", "商品标题", "类目路径", "商品描述", "商品编码"])
+    products.append([
+        "SKU06",
+        "UNITY优妮蒂男鞋低帮板鞋舒适休闲鞋",
+        "流行男鞋 > 低帮鞋 > 板鞋",
+        "fixture",
+        "demo001",
+    ])
 
     skus = workbook.create_sheet("SKU")
     skus.append(["商品编号", "SKU名称", "拼单价", "单买价", "参考价", "库存"])

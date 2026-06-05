@@ -107,6 +107,7 @@ class DraftSpikeDataTests(unittest.TestCase):
             {
                 "title": "Multi SKU Product",
                 "category": "default-category",
+                "product_code": "demo001",
                 "images": [{"path": "images/main.jpg", "role": "main"}],
                 "skus": [
                     {
@@ -122,6 +123,7 @@ class DraftSpikeDataTests(unittest.TestCase):
         data = draft_data_from_product(product)
 
         self.assertEqual(data.skus[0].size, "黑色 38")
+        self.assertEqual(data.product_code, "demo001")
         self.assertEqual(data.skus[0].option_values, ("黑色", "38"))
         self.assertEqual(data.skus[0].attribute_values, (("颜色分类", "黑色"), ("鞋码", "38")))
 

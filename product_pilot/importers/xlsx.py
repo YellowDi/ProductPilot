@@ -24,6 +24,7 @@ SHEET_ALIASES = {
 
 HEADER_ALIASES = {
     "product_id": ("商品编号", "product_id"),
+    "product_code": ("商品编码", "product_code"),
     "title": ("商品标题", "title"),
     "category": ("类目路径", "category"),
     "description": ("商品描述", "description"),
@@ -93,6 +94,7 @@ def _read_products(sheet: Any) -> dict[str, dict[str, Any]]:
         required=("product_id", "title", "category"),
         optional=(
             "description",
+            "product_code",
             "default_price",
             "default_single_price",
             "default_reference_price",
@@ -111,6 +113,7 @@ def _read_products(sheet: Any) -> dict[str, dict[str, Any]]:
             continue
         products[product_id] = {
             "product_id": product_id,
+            "product_code": _text(row.get("product_code")),
             "title": _text(row.get("title")),
             "category": _text(row.get("category")),
             "description": _text(row.get("description")),
