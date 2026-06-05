@@ -6,6 +6,14 @@
     {
       "path": "../SKU06.jpg",
       "role": "main"
+    },
+    {
+      "path": "../SKU06.jpg",
+      "role": "detail"
+    },
+    {
+      "path": "../SKU06.jpg",
+      "role": "sku"
     }
   ],
   "skus": [

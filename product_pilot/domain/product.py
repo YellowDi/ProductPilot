@@ -24,8 +24,8 @@ class ProductImage:
         errors: list[str] = []
         if not str(self.path):
             errors.append("image.path is required")
-        if self.role not in {"main", "gallery", "detail"}:
-            errors.append(f"image.role must be one of main, gallery, detail: {self.role}")
+        if self.role not in {"main", "gallery", "detail", "sku"}:
+            errors.append(f"image.role must be one of main, gallery, detail, sku: {self.role}")
         return errors
 
 

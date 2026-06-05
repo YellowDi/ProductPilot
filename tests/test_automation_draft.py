@@ -6,8 +6,11 @@ from decimal import Decimal
 from product_pilot.automation.draft import (
     DraftSkuData,
     DraftSpikeData,
+    UploadTarget,
     _format_decimal,
+    classify_sku_upload_targets,
     draft_data_from_product,
+    images_from_product,
     main_image_from_product,
     sort_skus_for_page,
 )
@@ -30,7 +33,11 @@ class DraftSpikeDataTests(unittest.TestCase):
             {
                 "title": "UNITY优妮蒂男鞋低帮板鞋舒适休闲鞋",
                 "category": "流行男鞋 > 低帮鞋 > 板鞋",
-                "images": [{"path": "../SKU06.jpg", "role": "main"}],
+                "images": [
+                    {"path": "../SKU06.jpg", "role": "main"},
+                    {"path": "../SKU06.jpg", "role": "detail"},
+                    {"path": "../SKU06.jpg", "role": "sku"},
+                ],
                 "skus": [
                     {
                         "name": "41",
@@ -58,6 +65,8 @@ class DraftSpikeDataTests(unittest.TestCase):
         self.assertEqual(data.skus[0].single_price, Decimal("39.90"))
         self.assertEqual(data.reference_price, Decimal("99.00"))
         self.assertEqual(main_image_from_product(product).path.as_posix(), "../SKU06.jpg")
+        self.assertEqual(len(images_from_product(product, "detail")), 1)
+        self.assertEqual(len(images_from_product(product, "sku")), 1)
 
     def test_sorts_numeric_skus_for_page(self) -> None:
         skus = (
@@ -67,6 +76,18 @@ class DraftSpikeDataTests(unittest.TestCase):
         )
 
         self.assertEqual([sku.size for sku in sort_skus_for_page(skus)], ["41", "42.5", "43"])
+
+    def test_classifies_visible_image_inputs_after_batch_upload_as_sku_targets(self) -> None:
+        targets = [
+            UploadTarget(4, "detail", True, False, True, "image/jpeg,image/png", "图片空间上传本地上传"),
+            UploadTarget(7, "unknown", True, False, True, "image/jpeg,image/png", "元 元 本地上传 批量设置"),
+            UploadTarget(8, "unknown", True, False, True, "image/jpeg,image/png", "本地上传"),
+            UploadTarget(9, "unknown", True, False, True, "image/jpeg,image/png", "本地上传"),
+        ]
+
+        classified = classify_sku_upload_targets(targets)
+
+        self.assertEqual([target.purpose for target in classified], ["detail", "unknown", "sku", "sku"])
 
 
 if __name__ == "__main__":

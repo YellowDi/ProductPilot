@@ -21,8 +21,10 @@ from product_pilot.automation.draft import (
     detect_draft_saved,
     fill_minimal_draft_fields,
     draft_data_from_product,
+    images_from_product,
     main_image_from_product,
     save_draft,
+    upload_extra_images,
 )
 from product_pilot.automation.field_scan import scan_publish_fields
 from product_pilot.automation.login import LoginState
@@ -206,10 +208,10 @@ def browser_check(args: argparse.Namespace) -> int:
         with PersistentBrowserSession(config) as session:
             session.open_backend()
             if args.hold:
-                input("Complete manual login in the opened browser, then press Enter to check status...")
+                wait_for_user("Complete manual login in the opened browser, then press Enter to check status...")
             result = session.check_login()
             if args.keep_open:
-                input("Press Enter to close the browser...")
+                wait_for_user("Press Enter to close the browser...")
     except BrowserAutomationError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -241,10 +243,10 @@ def publish_page_check(args: argparse.Namespace) -> int:
         with PersistentBrowserSession(config) as session:
             session.open_backend()
             if args.hold:
-                input("Complete manual login or risk checks in the opened browser, then press Enter...")
+                wait_for_user("Complete manual login or risk checks in the opened browser, then press Enter...")
             result = session.check_publish_page()
             if args.keep_open:
-                input("Press Enter to close the browser...")
+                wait_for_user("Press Enter to close the browser...")
     except BrowserAutomationError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -284,7 +286,7 @@ def field_scan(args: argparse.Namespace) -> int:
         with PersistentBrowserSession(config) as session:
             session.open_backend()
             if args.hold:
-                input("Complete manual login or risk checks in the opened browser, then press Enter...")
+                wait_for_user("Complete manual login or risk checks in the opened browser, then press Enter...")
 
             page_check = session.check_publish_page()
             if page_check.publish_page.state != PublishPageState.READY:
@@ -293,7 +295,7 @@ def field_scan(args: argparse.Namespace) -> int:
                 print(f"url: {page_check.publish_page.snapshot.url}")
                 print(f"screenshot: {page_check.screenshot_path.resolve()}")
                 if args.keep_open:
-                    input("Press Enter to close the browser...")
+                    wait_for_user("Press Enter to close the browser...")
                 return 1
 
             notes: list[str] = []
@@ -335,7 +337,7 @@ def field_scan(args: argparse.Namespace) -> int:
 
             print_field_scan_result(result, output_path)
             if args.keep_open:
-                input("Press Enter to close the browser...")
+                wait_for_user("Press Enter to close the browser...")
     except BrowserAutomationError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -385,6 +387,23 @@ def draft_spike(args: argparse.Namespace) -> int:
     if not main_image.exists():
         print(f"main image not found: {main_image}", file=sys.stderr)
         return 2
+    detail_images: tuple[Path, ...] = ()
+    sku_image: Path | None = None
+    if product is not None:
+        detail_images = tuple(
+            (product_base_dir / image.path).resolve()
+            for image in images_from_product(product, "detail")
+        )
+        sku_images = tuple(
+            (product_base_dir / image.path).resolve()
+            for image in images_from_product(product, "sku")
+        )
+        sku_image = sku_images[0] if sku_images else None
+        missing_images = [path for path in (*detail_images, *(sku_images[:1])) if not path.exists()]
+        if missing_images:
+            for path in missing_images:
+                print(f"image not found: {path}", file=sys.stderr)
+            return 2
 
     config = BrowserLaunchConfig(
         backend_url=args.url,
@@ -407,7 +426,7 @@ def draft_spike(args: argparse.Namespace) -> int:
         with PersistentBrowserSession(config) as session:
             session.open_backend()
             if args.hold:
-                input("Complete manual login or risk checks in the opened browser, then press Enter...")
+                wait_for_user("Complete manual login or risk checks in the opened browser, then press Enter...")
 
             page_check = session.check_publish_page()
             if page_check.publish_page.state != PublishPageState.READY:
@@ -416,7 +435,7 @@ def draft_spike(args: argparse.Namespace) -> int:
                 print(f"url: {page_check.publish_page.snapshot.url}")
                 print(f"screenshot: {page_check.screenshot_path.resolve()}")
                 if args.keep_open:
-                    input("Press Enter to close the browser...")
+                    wait_for_user("Press Enter to close the browser...")
                 return 1
 
             notes: list[str] = []
@@ -437,6 +456,12 @@ def draft_spike(args: argparse.Namespace) -> int:
             session.wait(8_000)
 
             notes.extend(fill_minimal_draft_fields(session.page, data))
+            upload_notes, upload_targets = upload_extra_images(
+                session.page,
+                detail_images=detail_images,
+                sku_image=sku_image,
+            )
+            notes.extend(upload_notes)
             if args.no_save:
                 notes.append("save skipped by --no-save")
                 saved = False
@@ -452,6 +477,7 @@ def draft_spike(args: argparse.Namespace) -> int:
                         "saved": saved,
                         "no_save": args.no_save,
                         "notes": notes,
+                        "upload_targets": [target.to_mapping() for target in upload_targets],
                         "screenshot_path": str(screenshot_path),
                     },
                     ensure_ascii=False,
@@ -468,7 +494,7 @@ def draft_spike(args: argparse.Namespace) -> int:
             print(f"screenshot: {screenshot_path.resolve()}")
             print(f"json: {output_path.resolve()}")
             if args.keep_open:
-                input("Press Enter to close the browser...")
+                wait_for_user("Press Enter to close the browser...")
     except BrowserAutomationError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -491,6 +517,13 @@ def _resolve_draft_skus(args: argparse.Namespace, default_draft: DraftSpikeData)
         )
 
     return default_draft.skus
+
+
+def wait_for_user(prompt: str) -> None:
+    try:
+        input(prompt)
+    except EOFError:
+        return
 
 
 if __name__ == "__main__":

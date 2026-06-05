@@ -11,7 +11,11 @@ class ProductDraftTests(unittest.TestCase):
             {
                 "title": "Test Product",
                 "category": "default-category",
-                "images": [{"path": "images/main.jpg", "role": "main"}],
+                "images": [
+                    {"path": "images/main.jpg", "role": "main"},
+                    {"path": "images/detail.jpg", "role": "detail"},
+                    {"path": "images/sku.jpg", "role": "sku"},
+                ],
                 "skus": [{"name": "default", "price": "19.90", "stock": 10}],
             }
         )

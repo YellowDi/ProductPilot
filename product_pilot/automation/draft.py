@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -41,6 +41,28 @@ class DraftSpikeResult:
         }
 
 
+@dataclass(frozen=True)
+class UploadTarget:
+    file_input_index: int
+    purpose: str
+    visible: bool
+    disabled: bool
+    multiple: bool
+    accept: str
+    nearby_text: str
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "file_input_index": self.file_input_index,
+            "purpose": self.purpose,
+            "visible": self.visible,
+            "disabled": self.disabled,
+            "multiple": self.multiple,
+            "accept": self.accept,
+            "nearby_text": self.nearby_text,
+        }
+
+
 def draft_data_from_product(product: ProductDraft) -> DraftSpikeData:
     skus = tuple(_draft_sku_from_product_sku(sku) for sku in product.skus)
     reference_price = max(_reference_price_for_product_sku(sku) for sku in product.skus)
@@ -56,6 +78,10 @@ def main_image_from_product(product: ProductDraft) -> ProductImage:
         if image.role == "main":
             return image
     raise ValueError("product has no main image")
+
+
+def images_from_product(product: ProductDraft, role: str) -> tuple[ProductImage, ...]:
+    return tuple(image for image in product.images if image.role == role)
 
 
 def fill_minimal_draft_fields(page: Any, data: DraftSpikeData) -> list[str]:
@@ -79,6 +105,147 @@ def fill_minimal_draft_fields(page: Any, data: DraftSpikeData) -> list[str]:
     notes.append("filled sku stock and prices")
 
     return notes
+
+
+def upload_extra_images(
+    page: Any,
+    *,
+    detail_images: tuple[Path, ...],
+    sku_image: Path | None,
+) -> tuple[list[str], list[UploadTarget]]:
+    notes: list[str] = []
+    targets = scan_upload_targets(page)
+
+    if detail_images:
+        detail_target = first_upload_target(targets, "detail")
+        if detail_target is None:
+            notes.append("detail image upload target not found")
+        else:
+            page.locator("input[type=file]").nth(detail_target.file_input_index).set_input_files(
+                [str(path) for path in detail_images]
+            )
+            page.wait_for_timeout(2_000)
+            notes.append(f"uploaded detail images: {len(detail_images)}")
+
+    if sku_image is not None:
+        targets = scan_upload_targets(page)
+        sku_targets = [target for target in targets if target.purpose == "sku"]
+        if not sku_targets:
+            notes.append("sku image upload target not found")
+        else:
+            uploaded_count = 0
+            for target in sorted(sku_targets, key=lambda item: item.file_input_index, reverse=True):
+                try:
+                    page.locator("input[type=file]").nth(target.file_input_index).set_input_files(
+                        str(sku_image),
+                        timeout=10_000,
+                    )
+                except Exception as exc:
+                    notes.append(f"sku image upload failed at input {target.file_input_index}: {exc}")
+                else:
+                    uploaded_count += 1
+                    page.wait_for_timeout(700)
+            notes.append(f"uploaded sku images: {uploaded_count}/{len(sku_targets)}")
+
+    return notes, targets
+
+
+def scan_upload_targets(page: Any) -> list[UploadTarget]:
+    raw_targets = page.evaluate(
+        """() => {
+            const compact = text => String(text || "").replace(/\\s+/g, " ").trim();
+            const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+            const textOf = el => compact(el.innerText || el.textContent || "");
+            const ancestorTexts = el => {
+                const texts = [];
+                let current = el;
+                for (let depth = 0; current && depth < 10; depth += 1) {
+                    const text = textOf(current);
+                    if (text && text.length <= 800) texts.push(text);
+                    current = current.parentElement;
+                }
+                return texts;
+            };
+            const purposeOf = texts => {
+                const text = texts.join(" ");
+                if (
+                    text.includes("价格及库存") ||
+                    (text.includes("拼单价") && text.includes("单买价") && text.includes("图片"))
+                ) {
+                    return "sku";
+                }
+                if (text.includes("快捷编辑") || text.includes("商品详情") || text.includes("已上传0/50")) {
+                    return "detail";
+                }
+                if (text.includes("商品轮播图") || text.includes("主轮播图")) {
+                    return "main";
+                }
+                if (text.includes("白底图")) {
+                    return "white_background";
+                }
+                return "unknown";
+            };
+
+            return Array.from(document.querySelectorAll("input[type=file]")).map((el, fileInputIndex) => {
+                const texts = ancestorTexts(el);
+                const nearbyText = texts.find(text => text.length > 8) || texts[0] || "";
+                return {
+                    file_input_index: fileInputIndex,
+                    purpose: purposeOf(texts),
+                    visible: visible(el),
+                    disabled: !!el.disabled,
+                    multiple: !!el.multiple,
+                    accept: el.accept || "",
+                    nearby_text: nearbyText,
+                };
+            });
+        }"""
+    )
+
+    targets = [
+        UploadTarget(
+            file_input_index=int(item.get("file_input_index", 0)),
+            purpose=str(item.get("purpose", "unknown")),
+            visible=bool(item.get("visible", False)),
+            disabled=bool(item.get("disabled", False)),
+            multiple=bool(item.get("multiple", False)),
+            accept=str(item.get("accept", "")),
+            nearby_text=str(item.get("nearby_text", "")),
+        )
+        for item in raw_targets
+    ]
+    return classify_sku_upload_targets(targets)
+
+
+def classify_sku_upload_targets(targets: list[UploadTarget]) -> list[UploadTarget]:
+    batch_indexes = [
+        target.file_input_index
+        for target in targets
+        if target.purpose == "unknown" and "批量设置" in target.nearby_text
+    ]
+    if not batch_indexes:
+        return targets
+
+    batch_index = min(batch_indexes)
+    return [
+        replace(target, purpose="sku")
+        if (
+            target.purpose == "unknown"
+            and target.file_input_index > batch_index
+            and target.visible
+            and not target.disabled
+            and "image" in target.accept
+        )
+        else target
+        for target in targets
+    ]
+
+
+def first_upload_target(targets: list[UploadTarget], purpose: str) -> UploadTarget | None:
+    for target in targets:
+        if target.purpose == purpose and not target.disabled:
+            return target
+    return None
 
 
 def save_draft(page: Any) -> list[str]:
