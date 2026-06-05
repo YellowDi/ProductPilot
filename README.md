@@ -72,6 +72,16 @@ python3 -m product_pilot.cli field-scan --main-image SKU06.jpg --advance --keep-
 
 The command writes a screenshot and JSON scan result under `artifacts/browser`. It does not click save, submit, publish, or any final listing action.
 
+## Draft Spike
+
+Save the current test product to the draft box:
+
+```bash
+python3 -m product_pilot.cli draft-spike --main-image SKU06.jpg --keep-open
+```
+
+This command can click `保存草稿`. It never clicks `提交并上架`.
+
 ## Quick Check
 
 ```bash

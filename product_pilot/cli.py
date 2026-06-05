@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,12 @@ from product_pilot.automation.browser import (
     PersistentBrowserSession,
 )
 from product_pilot.automation.category import DEFAULT_CATEGORY_PATH, format_category_path, parse_category_path, select_category
+from product_pilot.automation.draft import (
+    DraftSpikeData,
+    detect_draft_saved,
+    fill_minimal_draft_fields,
+    save_draft,
+)
 from product_pilot.automation.field_scan import scan_publish_fields
 from product_pilot.automation.login import LoginState
 from product_pilot.automation.publish import PublishPageState
@@ -82,6 +89,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     field_scan_parser.add_argument("--keep-open", action="store_true", help="Keep browser open after printing results.")
 
+    draft_parser = subparsers.add_parser(
+        "draft-spike",
+        help="Upload the test image, select the fixed category, fill minimal fields, and save a draft.",
+    )
+    default_draft = DraftSpikeData()
+    add_browser_arguments(
+        draft_parser,
+        default_url="https://mms.pinduoduo.com/goods/category",
+        url_help="Product publish category page URL.",
+    )
+    draft_parser.add_argument("--main-image", type=Path, required=True, help="Main carousel image to upload.")
+    draft_parser.add_argument(
+        "--category-path",
+        default=format_category_path(DEFAULT_CATEGORY_PATH),
+        help="Category path to select after image upload.",
+    )
+    draft_parser.add_argument("--title", default=default_draft.title, help="Product title for the draft spike.")
+    draft_parser.add_argument("--size", default=default_draft.size, help="Single shoe size to enable.")
+    draft_parser.add_argument("--stock", type=int, default=default_draft.stock, help="Stock for the enabled SKU.")
+    draft_parser.add_argument("--group-price", default=str(default_draft.group_price), help="Pinduoduo group price.")
+    draft_parser.add_argument("--single-price", default=str(default_draft.single_price), help="Single-buy price.")
+    draft_parser.add_argument(
+        "--reference-price",
+        default=str(default_draft.reference_price),
+        help="Reference price greater than the single-buy price.",
+    )
+    draft_parser.add_argument(
+        "--hold",
+        action="store_true",
+        help="Pause after opening the page for manual login or risk checks before upload.",
+    )
+    draft_parser.add_argument("--keep-open", action="store_true", help="Keep browser open after printing results.")
+
     return parser
 
 
@@ -136,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
         return publish_page_check(args)
     if args.command == "field-scan":
         return field_scan(args)
+    if args.command == "draft-spike":
+        return draft_spike(args)
 
     raise AssertionError(f"unsupported command: {args.command}")
 
@@ -304,6 +346,93 @@ def print_field_scan_result(result: Any, output_path: Path) -> None:
             print(f"- {note.splitlines()[0]}")
     print(f"screenshot: {result.screenshot_path.resolve()}")
     print(f"json: {output_path.resolve()}")
+
+
+def draft_spike(args: argparse.Namespace) -> int:
+    main_image = args.main_image.resolve()
+    if not main_image.exists():
+        print(f"main image not found: {main_image}", file=sys.stderr)
+        return 2
+
+    config = BrowserLaunchConfig(
+        backend_url=args.url,
+        user_data_dir=args.profile_dir,
+        artifacts_dir=args.artifacts_dir,
+        channel=args.channel,
+        headless=args.headless,
+        timeout_ms=args.timeout_ms,
+        slow_mo_ms=args.slow_mo_ms,
+    )
+    data = DraftSpikeData(
+        title=args.title,
+        size=args.size,
+        stock=args.stock,
+        group_price=Decimal(str(args.group_price)),
+        single_price=Decimal(str(args.single_price)),
+        reference_price=Decimal(str(args.reference_price)),
+    )
+
+    try:
+        with PersistentBrowserSession(config) as session:
+            session.open_backend()
+            if args.hold:
+                input("Complete manual login or risk checks in the opened browser, then press Enter...")
+
+            page_check = session.check_publish_page()
+            if page_check.publish_page.state != PublishPageState.READY:
+                print(f"state: {page_check.publish_page.state.value}")
+                print(f"reason: {page_check.publish_page.reason}")
+                print(f"url: {page_check.publish_page.snapshot.url}")
+                print(f"screenshot: {page_check.screenshot_path.resolve()}")
+                if args.keep_open:
+                    input("Press Enter to close the browser...")
+                return 1
+
+            notes: list[str] = []
+            session.page.locator("input[type=file]").first.set_input_files(str(main_image))
+            session.wait(10_000)
+
+            category_path = parse_category_path(args.category_path)
+            category_result = select_category(session.page, category_path)
+            notes.extend(category_result.notes)
+            session.wait(2_000)
+
+            session.page.get_by_text("下一步, 完善商品信息", exact=True).click(timeout=10_000)
+            session.wait(8_000)
+
+            notes.extend(fill_minimal_draft_fields(session.page, data))
+            notes.extend(save_draft(session.page))
+            saved = detect_draft_saved(session.page)
+            screenshot_path = session.take_screenshot("draft-spike")
+            output_path = screenshot_path.with_suffix(".json")
+            output_path.write_text(
+                json.dumps(
+                    {
+                        "url": session.page.url,
+                        "saved": saved,
+                        "notes": notes,
+                        "screenshot_path": str(screenshot_path),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            print(f"saved: {saved}")
+            print(f"url: {session.page.url}")
+            print("notes:")
+            for note in notes:
+                print(f"- {note.splitlines()[0]}")
+            print(f"screenshot: {screenshot_path.resolve()}")
+            print(f"json: {output_path.resolve()}")
+            if args.keep_open:
+                input("Press Enter to close the browser...")
+    except BrowserAutomationError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    return 0 if saved else 1
 
 
 if __name__ == "__main__":
