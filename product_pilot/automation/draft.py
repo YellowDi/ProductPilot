@@ -65,6 +65,8 @@ class UploadTarget:
     multiple: bool
     accept: str
     nearby_text: str
+    top: float = 0
+    left: float = 0
 
     def to_mapping(self) -> dict[str, Any]:
         return {
@@ -75,6 +77,8 @@ class UploadTarget:
             "multiple": self.multiple,
             "accept": self.accept,
             "nearby_text": self.nearby_text,
+            "top": self.top,
+            "left": self.left,
         }
 
 
@@ -229,6 +233,7 @@ def scan_upload_targets(page: Any) -> list[UploadTarget]:
 
             return Array.from(document.querySelectorAll("input[type=file]")).map((el, fileInputIndex) => {
                 const texts = ancestorTexts(el);
+                const rect = el.getBoundingClientRect();
                 const nearbyText = texts.find(text => text.length > 8) || texts[0] || "";
                 return {
                     file_input_index: fileInputIndex,
@@ -238,6 +243,8 @@ def scan_upload_targets(page: Any) -> list[UploadTarget]:
                     multiple: !!el.multiple,
                     accept: el.accept || "",
                     nearby_text: nearbyText,
+                    top: rect.top,
+                    left: rect.left,
                 };
             });
         }"""
@@ -252,6 +259,8 @@ def scan_upload_targets(page: Any) -> list[UploadTarget]:
             multiple=bool(item.get("multiple", False)),
             accept=str(item.get("accept", "")),
             nearby_text=str(item.get("nearby_text", "")),
+            top=float(item.get("top", 0) or 0),
+            left=float(item.get("left", 0) or 0),
         )
         for item in raw_targets
     ]
@@ -375,7 +384,6 @@ def fill_color_sku_options(
 
     image_by_value = first_sku_image_by_value(sku_images, "颜色分类")
     created_count = 0
-    uploaded_count = 0
     for value in values:
         try:
             select_or_create_color_sku_option(page, value)
@@ -384,23 +392,29 @@ def fill_color_sku_options(
             continue
         created_count += 1
 
-        image = image_by_value.get(value)
-        if image is None:
-            continue
-        target = latest_color_sku_upload_target(scan_upload_targets(page))
-        if target is None:
-            notes.append(f"color sku image upload target not found: {value}")
-            continue
-        try:
-            page.locator("input[type=file]").nth(target.file_input_index).set_input_files(
-                str(image.path),
-                timeout=10_000,
-            )
-        except Exception as exc:
-            notes.append(f"color sku image upload failed: {value}: {exc}")
-        else:
-            uploaded_count += 1
-            page.wait_for_timeout(700)
+    uploaded_count = 0
+    if image_by_value:
+        targets = color_sku_upload_targets(scan_upload_targets(page), expected_count=len(values))
+        uploads: list[tuple[UploadTarget, str, SkuImageUpload]] = []
+        for index, value in enumerate(values):
+            image = image_by_value.get(value)
+            if image is None:
+                continue
+            if index >= len(targets):
+                notes.append(f"color sku image upload target not found: {value}")
+                continue
+            uploads.append((targets[index], value, image))
+        for target, value, image in sorted(uploads, key=lambda item: item[0].file_input_index, reverse=True):
+            try:
+                page.locator("input[type=file]").nth(target.file_input_index).set_input_files(
+                    str(image.path),
+                    timeout=15_000,
+                )
+            except Exception as exc:
+                notes.append(f"color sku image upload failed: {value}: {exc}")
+            else:
+                uploaded_count += 1
+                page.wait_for_timeout(700)
 
     notes.append(f"processed color sku options: {created_count}/{len(values)}")
     if image_by_value:
@@ -408,8 +422,33 @@ def fill_color_sku_options(
     return notes
 
 
+def color_sku_upload_targets(targets: list[UploadTarget], *, expected_count: int) -> list[UploadTarget]:
+    sku_table_indexes = [
+        target.file_input_index
+        for target in targets
+        if target.purpose == "sku" or "批量设置" in target.nearby_text
+    ]
+    sku_table_index = min(sku_table_indexes) if sku_table_indexes else None
+    candidates = [
+        target
+        for target in targets
+        if (
+            target.purpose == "unknown"
+            and target.visible
+            and not target.disabled
+            and "image" in target.accept
+            and (sku_table_index is None or target.file_input_index < sku_table_index)
+        )
+    ]
+    return sorted(candidates, key=lambda target: (int(target.top // 20), target.left))[:expected_count]
+
+
 def select_or_create_color_sku_option(page: Any, value: str) -> None:
-    color_input = page.get_by_placeholder("选择或输入主色").first
+    input_index = first_empty_color_input_index(page)
+    if input_index is None:
+        raise ValueError("empty color sku input not found")
+
+    color_input = page.get_by_placeholder("选择或输入主色").nth(input_index)
     color_input.click(timeout=8_000)
     color_input.fill(value)
     page.wait_for_timeout(300)
@@ -424,6 +463,19 @@ def select_or_create_color_sku_option(page: Any, value: str) -> None:
     except Exception:
         pass
     page.wait_for_timeout(300)
+
+
+def first_empty_color_input_index(page: Any) -> int | None:
+    index = page.evaluate(
+        """() => {
+            const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+            const inputs = Array.from(document.querySelectorAll('input[placeholder="选择或输入主色"]'))
+                .filter(visible);
+            const index = inputs.findIndex(el => !String(el.value || "").trim());
+            return index >= 0 ? index : null;
+        }"""
+    )
+    return int(index) if index is not None else None
 
 
 def click_visible_dropdown_option(page: Any, text: str) -> bool:
@@ -461,29 +513,6 @@ def first_sku_image_by_value(
             continue
         images.setdefault(image.sku_value, image)
     return images
-
-
-def latest_color_sku_upload_target(targets: list[UploadTarget]) -> UploadTarget | None:
-    sku_table_indexes = [
-        target.file_input_index
-        for target in targets
-        if target.purpose == "sku" or "批量设置" in target.nearby_text
-    ]
-    sku_table_index = min(sku_table_indexes) if sku_table_indexes else None
-    candidates = [
-        target
-        for target in targets
-        if (
-            target.purpose == "unknown"
-            and target.visible
-            and not target.disabled
-            and "image" in target.accept
-            and (sku_table_index is None or target.file_input_index < sku_table_index)
-        )
-    ]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda target: target.file_input_index)
 
 
 def fill_sku_table(page: Any, skus: tuple[DraftSkuData, ...]) -> None:

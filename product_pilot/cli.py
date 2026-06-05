@@ -14,7 +14,13 @@ from product_pilot.automation.browser import (
     BrowserLaunchConfig,
     PersistentBrowserSession,
 )
-from product_pilot.automation.category import DEFAULT_CATEGORY_PATH, format_category_path, parse_category_path, select_category
+from product_pilot.automation.category import (
+    DEFAULT_CATEGORY_PATH,
+    click_next_product_info,
+    format_category_path,
+    parse_category_path,
+    select_category,
+)
 from product_pilot.automation.draft import (
     DraftSpikeData,
     DraftSkuData,
@@ -373,7 +379,7 @@ def field_scan(args: argparse.Namespace) -> int:
 
             if args.advance and category_selected:
                 try:
-                    session.page.get_by_text("下一步, 完善商品信息", exact=True).click(timeout=8_000)
+                    click_next_product_info(session.page, notes, timeout=8_000)
                 except Exception as exc:
                     notes.append(f"advance failed: {exc}")
                 else:
@@ -516,7 +522,7 @@ def draft_spike(args: argparse.Namespace) -> int:
             notes.extend(category_result.notes)
             session.wait(2_000)
 
-            session.page.get_by_text("下一步, 完善商品信息", exact=True).click(timeout=10_000)
+            click_next_product_info(session.page, notes, timeout=10_000)
             session.wait(8_000)
 
             notes.extend(fill_minimal_draft_fields(session.page, data, sku_images=sku_images))

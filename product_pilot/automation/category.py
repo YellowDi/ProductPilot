@@ -90,3 +90,47 @@ def select_recommended_category(page: Any, target: str) -> bool:
     page.get_by_role("button", name="确认").first.click(timeout=10_000, force=True)
     page.wait_for_timeout(2_000)
     return True
+
+
+def click_next_product_info(page: Any, notes: list[str], *, timeout: int = 10_000) -> None:
+    dismiss_blocking_modals(page, notes)
+    try:
+        page.get_by_text("下一步, 完善商品信息", exact=True).click(timeout=timeout)
+    except Exception as exc:
+        if "intercepts pointer events" not in str(exc):
+            raise
+        if not dismiss_blocking_modals(page, notes):
+            raise
+        page.get_by_text("下一步, 完善商品信息", exact=True).click(timeout=timeout)
+
+
+def dismiss_blocking_modals(page: Any, notes: list[str]) -> bool:
+    dismissed = False
+    for _ in range(3):
+        action = page.evaluate(
+            """() => {
+                const compact = value => String(value || "").replace(/\\s+/g, " ").trim();
+                const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+                const modals = Array.from(document.querySelectorAll(
+                    '[data-testid="beast-core-modal"], [class*="MDL_outerWrapper"]'
+                )).filter(visible);
+                const buttonNames = ["确认", "确定", "知道了", "我知道了", "关闭"];
+                for (const modal of modals) {
+                    const buttons = Array.from(modal.querySelectorAll('button, [role="button"]')).filter(visible);
+                    for (const name of buttonNames) {
+                        const button = buttons.find(el => compact(el.innerText || el.textContent) === name);
+                        if (button) {
+                            button.click();
+                            return name;
+                        }
+                    }
+                }
+                return "";
+            }"""
+        )
+        if not action:
+            return dismissed
+        dismissed = True
+        notes.append(f"dismissed blocking modal: {action}")
+        page.wait_for_timeout(1_000)
+    return dismissed

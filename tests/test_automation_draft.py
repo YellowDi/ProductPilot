@@ -9,9 +9,9 @@ from product_pilot.automation.draft import (
     UploadTarget,
     _format_decimal,
     classify_sku_upload_targets,
+    color_sku_upload_targets,
     draft_data_from_product,
     images_from_product,
-    latest_color_sku_upload_target,
     main_image_from_product,
     sku_option_groups,
     sort_skus_for_page,
@@ -171,19 +171,19 @@ class DraftSpikeDataTests(unittest.TestCase):
 
         self.assertEqual([target.purpose for target in classified], ["detail", "unknown", "sku", "sku"])
 
-    def test_selects_latest_color_upload_target_before_sku_table(self) -> None:
+    def test_selects_color_upload_targets_before_sku_table(self) -> None:
         targets = [
             UploadTarget(4, "detail", True, False, True, "image/jpeg,image/png", "图片空间上传本地上传"),
-            UploadTarget(5, "unknown", True, False, True, "image/jpeg,image/png", "本地上传"),
-            UploadTarget(6, "unknown", True, False, True, "image/jpeg,image/png", "本地上传"),
-            UploadTarget(7, "unknown", True, False, True, "image/jpeg,image/png", "元 元 本地上传 批量设置"),
-            UploadTarget(8, "sku", True, False, True, "image/jpeg,image/png", "本地上传"),
+            UploadTarget(5, "unknown", True, False, True, "image/jpeg,image/png", "本地上传", top=100, left=300),
+            UploadTarget(6, "unknown", True, False, True, "image/jpeg,image/png", "本地上传", top=200, left=300),
+            UploadTarget(9, "unknown", True, False, True, "image/jpeg,image/png", "本地上传", top=100, left=800),
+            UploadTarget(10, "unknown", True, False, True, "image/jpeg,image/png", "元 元 本地上传 批量设置"),
+            UploadTarget(11, "sku", True, False, True, "image/jpeg,image/png", "本地上传"),
         ]
 
-        target = latest_color_sku_upload_target(targets)
+        selected = color_sku_upload_targets(targets, expected_count=3)
 
-        self.assertIsNotNone(target)
-        self.assertEqual(target.file_input_index, 6)
+        self.assertEqual([target.file_input_index for target in selected], [5, 9, 6])
 
 
 if __name__ == "__main__":
