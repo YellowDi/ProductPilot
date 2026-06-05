@@ -1,0 +1,23 @@
+{
+  "title": "Test Product",
+  "category": "default-category",
+  "description": "Example product draft for local validation.",
+  "images": [
+    {
+      "path": "images/main.jpg",
+      "role": "main"
+    },
+    {
+      "path": "images/detail.jpg",
+      "role": "detail"
+    }
+  ],
+  "skus": [
+    {
+      "name": "default",
+      "price": "19.90",
+      "stock": 10
+    }
+  ]
+}
+
