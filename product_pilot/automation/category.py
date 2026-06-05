@@ -87,6 +87,6 @@ def select_recommended_category(page: Any, target: str) -> bool:
     )
     if not clicked:
         return False
-    page.get_by_role("button", name="确认").first.click(timeout=10_000)
+    page.get_by_role("button", name="确认").first.click(timeout=10_000, force=True)
     page.wait_for_timeout(2_000)
     return True

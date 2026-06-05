@@ -18,6 +18,7 @@ from product_pilot.automation.category import DEFAULT_CATEGORY_PATH, format_cate
 from product_pilot.automation.draft import (
     DraftSpikeData,
     DraftSkuData,
+    SkuImageUpload,
     detect_draft_saved,
     fill_minimal_draft_fields,
     draft_data_from_product,
@@ -446,18 +447,27 @@ def draft_spike(args: argparse.Namespace) -> int:
     if not main_image.exists():
         print(f"main image not found: {main_image}", file=sys.stderr)
         return 2
+    extra_main_images: tuple[Path, ...] = ()
     detail_images: tuple[Path, ...] = ()
-    sku_image: Path | None = None
+    sku_images: tuple[SkuImageUpload, ...] = ()
     if product is not None:
+        product_main_images = tuple(
+            resolve_product_asset_path(product_base_dir, image.path)
+            for image in images_from_product(product, "main")
+        )
+        extra_main_images = tuple(path for path in product_main_images if path != main_image)
         detail_images = tuple(
             resolve_product_asset_path(product_base_dir, image.path)
             for image in images_from_product(product, "detail")
         )
         sku_images = tuple(
-            resolve_product_asset_path(product_base_dir, image.path)
+            SkuImageUpload(
+                path=resolve_product_asset_path(product_base_dir, image.path),
+                sku_attribute=image.sku_attribute,
+                sku_value=image.sku_value,
+            )
             for image in images_from_product(product, "sku")
         )
-        sku_image = sku_images[0] if sku_images else None
 
     config = BrowserLaunchConfig(
         backend_url=args.url,
@@ -509,11 +519,16 @@ def draft_spike(args: argparse.Namespace) -> int:
             session.page.get_by_text("下一步, 完善商品信息", exact=True).click(timeout=10_000)
             session.wait(8_000)
 
-            notes.extend(fill_minimal_draft_fields(session.page, data))
+            notes.extend(fill_minimal_draft_fields(session.page, data, sku_images=sku_images))
             upload_notes, upload_targets = upload_extra_images(
                 session.page,
+                main_images=extra_main_images,
                 detail_images=detail_images,
-                sku_image=sku_image,
+                sku_images=tuple(
+                    image.path
+                    for image in sku_images
+                    if image.sku_attribute != "颜色分类"
+                ),
             )
             notes.extend(upload_notes)
             if args.no_save:

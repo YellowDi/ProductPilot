@@ -16,6 +16,21 @@ class DraftSkuData:
     stock: int = 10
     group_price: Decimal = Decimal("29.90")
     single_price: Decimal = Decimal("39.90")
+    option_values: tuple[str, ...] = ()
+    attribute_values: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class SkuOptionGroup:
+    attribute: str
+    values: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SkuImageUpload:
+    path: Path
+    sku_attribute: str = ""
+    sku_value: str = ""
 
 
 @dataclass(frozen=True)
@@ -84,7 +99,12 @@ def images_from_product(product: ProductDraft, role: str) -> tuple[ProductImage,
     return tuple(image for image in product.images if image.role == role)
 
 
-def fill_minimal_draft_fields(page: Any, data: DraftSpikeData) -> list[str]:
+def fill_minimal_draft_fields(
+    page: Any,
+    data: DraftSpikeData,
+    *,
+    sku_images: tuple[SkuImageUpload, ...] = (),
+) -> list[str]:
     notes: list[str] = []
 
     dismiss_known_tips(page)
@@ -95,9 +115,15 @@ def fill_minimal_draft_fields(page: Any, data: DraftSpikeData) -> list[str]:
     notes.append("filled title")
 
     sorted_skus = sort_skus_for_page(data.skus)
-    for sku in sorted_skus:
-        click_label_by_exact_text(page, sku.size)
-    notes.append(f"selected sizes: {', '.join(sku.size for sku in sorted_skus)}")
+    option_groups = sku_option_groups(sorted_skus)
+    processed_groups: list[str] = []
+    for group in option_groups:
+        if group.attribute == "颜色分类":
+            notes.extend(fill_color_sku_options(page, group.values, sku_images))
+        else:
+            notes.extend(select_sku_option_values(page, group))
+        processed_groups.append(format_sku_option_group(group))
+    notes.append(f"processed sku options: {'; '.join(processed_groups)}")
     page.wait_for_timeout(2_000)
 
     fill_sku_table(page, sorted_skus)
@@ -110,11 +136,23 @@ def fill_minimal_draft_fields(page: Any, data: DraftSpikeData) -> list[str]:
 def upload_extra_images(
     page: Any,
     *,
+    main_images: tuple[Path, ...] = (),
     detail_images: tuple[Path, ...],
-    sku_image: Path | None,
+    sku_images: tuple[Path, ...] = (),
 ) -> tuple[list[str], list[UploadTarget]]:
     notes: list[str] = []
     targets = scan_upload_targets(page)
+
+    if main_images:
+        main_target = first_upload_target(targets, "main")
+        if main_target is None:
+            notes.append("main image upload target not found")
+        else:
+            page.locator("input[type=file]").nth(main_target.file_input_index).set_input_files(
+                [str(path) for path in main_images]
+            )
+            page.wait_for_timeout(2_000)
+            notes.append(f"uploaded extra main images: {len(main_images)}")
 
     if detail_images:
         detail_target = first_upload_target(targets, "detail")
@@ -127,14 +165,15 @@ def upload_extra_images(
             page.wait_for_timeout(2_000)
             notes.append(f"uploaded detail images: {len(detail_images)}")
 
-    if sku_image is not None:
+    if sku_images:
         targets = scan_upload_targets(page)
         sku_targets = [target for target in targets if target.purpose == "sku"]
         if not sku_targets:
             notes.append("sku image upload target not found")
         else:
             uploaded_count = 0
-            for target in sorted(sku_targets, key=lambda item: item.file_input_index, reverse=True):
+            ordered_targets = sorted(sku_targets, key=lambda item: item.file_input_index)
+            for target, sku_image in zip(ordered_targets, sku_images, strict=False):
                 try:
                     page.locator("input[type=file]").nth(target.file_input_index).set_input_files(
                         str(sku_image),
@@ -145,7 +184,9 @@ def upload_extra_images(
                 else:
                     uploaded_count += 1
                     page.wait_for_timeout(700)
-            notes.append(f"uploaded sku images: {uploaded_count}/{len(sku_targets)}")
+            notes.append(f"uploaded sku images: {uploaded_count}/{len(sku_images)}")
+            if len(sku_targets) != len(sku_images):
+                notes.append(f"sku image target count differs from image count: {len(sku_targets)}/{len(sku_images)}")
 
     return notes, targets
 
@@ -295,19 +336,154 @@ def click_optional_button(page: Any, name: str, notes: list[str]) -> None:
         page.wait_for_timeout(1_000)
 
 
-def click_label_by_exact_text(page: Any, text: str) -> None:
-    page.evaluate(
+def click_label_by_exact_text(page: Any, text: str) -> bool:
+    return bool(page.evaluate(
         """target => {
             const compact = value => (value || "").replace(/\\s+/g, " ").trim();
             const label = Array.from(document.querySelectorAll("label"))
                 .find(el => compact(el.innerText || el.textContent) === target);
             if (!label) {
-                throw new Error(`label not found: ${target}`);
+                return false;
             }
             label.click();
+            return true;
         }""",
         text,
-    )
+    ))
+
+
+def select_sku_option_values(page: Any, group: SkuOptionGroup) -> list[str]:
+    notes: list[str] = []
+    for value in group.values:
+        if click_label_by_exact_text(page, value):
+            continue
+        notes.append(f"sku option not found: {format_sku_option(group.attribute, value)}")
+    return notes
+
+
+def fill_color_sku_options(
+    page: Any,
+    values: tuple[str, ...],
+    sku_images: tuple[SkuImageUpload, ...],
+) -> list[str]:
+    notes: list[str] = []
+    color_inputs = page.get_by_placeholder("选择或输入主色")
+    if color_inputs.count() == 0:
+        fallback_group = SkuOptionGroup("颜色分类", values)
+        notes.append("color sku input not found; falling back to label selection")
+        return notes + select_sku_option_values(page, fallback_group)
+
+    image_by_value = first_sku_image_by_value(sku_images, "颜色分类")
+    created_count = 0
+    uploaded_count = 0
+    for value in values:
+        try:
+            select_or_create_color_sku_option(page, value)
+        except Exception as exc:
+            notes.append(f"color sku option failed: {value}: {exc}")
+            continue
+        created_count += 1
+
+        image = image_by_value.get(value)
+        if image is None:
+            continue
+        target = latest_color_sku_upload_target(scan_upload_targets(page))
+        if target is None:
+            notes.append(f"color sku image upload target not found: {value}")
+            continue
+        try:
+            page.locator("input[type=file]").nth(target.file_input_index).set_input_files(
+                str(image.path),
+                timeout=10_000,
+            )
+        except Exception as exc:
+            notes.append(f"color sku image upload failed: {value}: {exc}")
+        else:
+            uploaded_count += 1
+            page.wait_for_timeout(700)
+
+    notes.append(f"processed color sku options: {created_count}/{len(values)}")
+    if image_by_value:
+        notes.append(f"uploaded color sku images: {uploaded_count}/{len(image_by_value)}")
+    return notes
+
+
+def select_or_create_color_sku_option(page: Any, value: str) -> None:
+    color_input = page.get_by_placeholder("选择或输入主色").first
+    color_input.click(timeout=8_000)
+    color_input.fill(value)
+    page.wait_for_timeout(300)
+    if click_visible_dropdown_option(page, value):
+        page.wait_for_timeout(500)
+        return
+
+    color_input.press("Enter", timeout=3_000)
+    page.wait_for_timeout(300)
+    try:
+        color_input.press("Tab", timeout=3_000)
+    except Exception:
+        pass
+    page.wait_for_timeout(300)
+
+
+def click_visible_dropdown_option(page: Any, text: str) -> bool:
+    return bool(page.evaluate(
+        """target => {
+            const compact = value => String(value || "").replace(/\\s+/g, " ").trim();
+            const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+            const selectors = [
+                "[role=option]",
+                "[role=menuitem]",
+                "li",
+                ".PP_select_menu_item",
+                ".PP_dropdown_menu_item",
+                ".ant-select-item-option"
+            ];
+            const candidates = Array.from(document.querySelectorAll(selectors.join(",")))
+                .filter(el => visible(el) && compact(el.innerText || el.textContent) === target);
+            if (!candidates.length) {
+                return false;
+            }
+            candidates[0].click();
+            return true;
+        }""",
+        text,
+    ))
+
+
+def first_sku_image_by_value(
+    sku_images: tuple[SkuImageUpload, ...],
+    attribute: str,
+) -> dict[str, SkuImageUpload]:
+    images: dict[str, SkuImageUpload] = {}
+    for image in sku_images:
+        if image.sku_attribute != attribute or not image.sku_value:
+            continue
+        images.setdefault(image.sku_value, image)
+    return images
+
+
+def latest_color_sku_upload_target(targets: list[UploadTarget]) -> UploadTarget | None:
+    sku_table_indexes = [
+        target.file_input_index
+        for target in targets
+        if target.purpose == "sku" or "批量设置" in target.nearby_text
+    ]
+    sku_table_index = min(sku_table_indexes) if sku_table_indexes else None
+    candidates = [
+        target
+        for target in targets
+        if (
+            target.purpose == "unknown"
+            and target.visible
+            and not target.disabled
+            and "image" in target.accept
+            and (sku_table_index is None or target.file_input_index < sku_table_index)
+        )
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda target: target.file_input_index)
 
 
 def fill_sku_table(page: Any, skus: tuple[DraftSkuData, ...]) -> None:
@@ -344,7 +520,46 @@ def fill_first_placeholder(page: Any, placeholder: str, value: str) -> None:
 
 
 def sort_skus_for_page(skus: tuple[DraftSkuData, ...]) -> tuple[DraftSkuData, ...]:
+    if any(len(sku.option_values) > 1 for sku in skus):
+        return skus
     return tuple(sorted(skus, key=lambda sku: _size_sort_key(sku.size)))
+
+
+def sku_option_groups(skus: tuple[DraftSkuData, ...]) -> tuple[SkuOptionGroup, ...]:
+    groups: dict[str, list[str]] = {}
+    seen: dict[str, set[str]] = {}
+    for sku in skus:
+        option_pairs = sku.attribute_values
+        if not option_pairs:
+            option_pairs = tuple(("", value) for value in (sku.option_values or (sku.size,)))
+        for attribute, value in option_pairs:
+            if not value:
+                continue
+            if attribute not in groups:
+                groups[attribute] = []
+                seen[attribute] = set()
+            if value in seen[attribute]:
+                continue
+            seen[attribute].add(value)
+            groups[attribute].append(value)
+
+    return tuple(
+        SkuOptionGroup(attribute=attribute, values=tuple(values))
+        for attribute, values in groups.items()
+    )
+
+
+def format_sku_option_group(group: SkuOptionGroup) -> str:
+    values = ", ".join(group.values)
+    if group.attribute:
+        return f"{group.attribute}: {values}"
+    return values
+
+
+def format_sku_option(attribute: str, value: str) -> str:
+    if attribute:
+        return f"{attribute}={value}"
+    return value
 
 
 def _format_decimal(value: Decimal) -> str:
@@ -353,11 +568,14 @@ def _format_decimal(value: Decimal) -> str:
 
 def _draft_sku_from_product_sku(sku: ProductSku) -> DraftSkuData:
     single_price = sku.single_price if sku.single_price is not None else sku.price
+    option_values = tuple(sku.attributes.values()) if sku.attributes else (sku.name,)
     return DraftSkuData(
         size=sku.name,
         stock=sku.stock,
         group_price=sku.price,
         single_price=single_price,
+        option_values=option_values,
+        attribute_values=tuple(sku.attributes.items()),
     )
 
 
@@ -371,3 +589,14 @@ def _size_sort_key(size: str) -> tuple[int, Decimal | str]:
         return (0, Decimal(size))
     except Exception:
         return (1, size)
+
+
+def unique_sku_option_values(skus: tuple[DraftSkuData, ...]) -> tuple[str, ...]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for group in sku_option_groups(skus):
+        for value in group.values:
+            if value and value not in seen:
+                seen.add(value)
+                values.append(value)
+    return tuple(values)

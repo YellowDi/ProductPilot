@@ -11,8 +11,11 @@ from product_pilot.automation.draft import (
     classify_sku_upload_targets,
     draft_data_from_product,
     images_from_product,
+    latest_color_sku_upload_target,
     main_image_from_product,
+    sku_option_groups,
     sort_skus_for_page,
+    unique_sku_option_values,
 )
 from product_pilot.domain.product import ProductDraft
 
@@ -77,6 +80,85 @@ class DraftSpikeDataTests(unittest.TestCase):
 
         self.assertEqual([sku.size for sku in sort_skus_for_page(skus)], ["41", "42.5", "43"])
 
+    def test_keeps_multi_attribute_skus_in_product_order(self) -> None:
+        skus = (
+            DraftSkuData(
+                size="黑色 38",
+                stock=1,
+                group_price=Decimal("1"),
+                single_price=Decimal("2"),
+                option_values=("黑色", "38"),
+            ),
+            DraftSkuData(
+                size="棕色 38",
+                stock=1,
+                group_price=Decimal("1"),
+                single_price=Decimal("2"),
+                option_values=("棕色", "38"),
+            ),
+        )
+
+        self.assertEqual([sku.size for sku in sort_skus_for_page(skus)], ["黑色 38", "棕色 38"])
+        self.assertEqual(unique_sku_option_values(skus), ("黑色", "38", "棕色"))
+
+    def test_maps_product_sku_attributes_to_draft_options(self) -> None:
+        product = ProductDraft.from_mapping(
+            {
+                "title": "Multi SKU Product",
+                "category": "default-category",
+                "images": [{"path": "images/main.jpg", "role": "main"}],
+                "skus": [
+                    {
+                        "name": "黑色 38",
+                        "attributes": {"颜色分类": "黑色", "鞋码": "38"},
+                        "price": "146.64",
+                        "stock": 1000,
+                    }
+                ],
+            }
+        )
+
+        data = draft_data_from_product(product)
+
+        self.assertEqual(data.skus[0].size, "黑色 38")
+        self.assertEqual(data.skus[0].option_values, ("黑色", "38"))
+        self.assertEqual(data.skus[0].attribute_values, (("颜色分类", "黑色"), ("鞋码", "38")))
+
+    def test_groups_sku_options_by_attribute(self) -> None:
+        skus = (
+            DraftSkuData(
+                size="黑色 38",
+                stock=1,
+                group_price=Decimal("1"),
+                single_price=Decimal("2"),
+                option_values=("黑色", "38"),
+                attribute_values=(("颜色分类", "黑色"), ("鞋码", "38")),
+            ),
+            DraftSkuData(
+                size="黑色 39",
+                stock=1,
+                group_price=Decimal("1"),
+                single_price=Decimal("2"),
+                option_values=("黑色", "39"),
+                attribute_values=(("颜色分类", "黑色"), ("鞋码", "39")),
+            ),
+            DraftSkuData(
+                size="棕色 38",
+                stock=1,
+                group_price=Decimal("1"),
+                single_price=Decimal("2"),
+                option_values=("棕色", "38"),
+                attribute_values=(("颜色分类", "棕色"), ("鞋码", "38")),
+            ),
+        )
+
+        groups = sku_option_groups(skus)
+
+        self.assertEqual([(group.attribute, group.values) for group in groups], [
+            ("颜色分类", ("黑色", "棕色")),
+            ("鞋码", ("38", "39")),
+        ])
+
     def test_classifies_visible_image_inputs_after_batch_upload_as_sku_targets(self) -> None:
         targets = [
             UploadTarget(4, "detail", True, False, True, "image/jpeg,image/png", "图片空间上传本地上传"),
@@ -88,6 +170,20 @@ class DraftSpikeDataTests(unittest.TestCase):
         classified = classify_sku_upload_targets(targets)
 
         self.assertEqual([target.purpose for target in classified], ["detail", "unknown", "sku", "sku"])
+
+    def test_selects_latest_color_upload_target_before_sku_table(self) -> None:
+        targets = [
+            UploadTarget(4, "detail", True, False, True, "image/jpeg,image/png", "图片空间上传本地上传"),
+            UploadTarget(5, "unknown", True, False, True, "image/jpeg,image/png", "本地上传"),
+            UploadTarget(6, "unknown", True, False, True, "image/jpeg,image/png", "本地上传"),
+            UploadTarget(7, "unknown", True, False, True, "image/jpeg,image/png", "元 元 本地上传 批量设置"),
+            UploadTarget(8, "sku", True, False, True, "image/jpeg,image/png", "本地上传"),
+        ]
+
+        target = latest_color_sku_upload_target(targets)
+
+        self.assertIsNotNone(target)
+        self.assertEqual(target.file_input_index, 6)
 
 
 if __name__ == "__main__":
