@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -21,24 +20,22 @@ from product_pilot.automation.category import (
     parse_category_path,
     select_category,
 )
-from product_pilot.automation.draft import (
-    DraftSpikeData,
-    DraftSkuData,
-    SkuImageUpload,
-    detect_draft_saved,
-    fill_minimal_draft_fields,
-    draft_data_from_product,
-    images_from_product,
-    main_image_from_product,
-    save_draft,
-    upload_extra_images,
-    wait_for_uploads_to_settle,
-)
 from product_pilot.automation.field_scan import scan_publish_fields
-from product_pilot.automation.login import LoginState
 from product_pilot.automation.publish import PublishPageState
+from product_pilot.app import (
+    DraftSpikePageNotReadyError,
+    DraftSpikeRequest,
+    ProductPilotAppError,
+    browser_login_exit_code,
+    load_single_product_file,
+    load_products_file as load_products_file_result,
+    publish_page_exit_code,
+    run_browser_login_check,
+    run_draft_spike,
+    run_publish_page_check,
+    validate_product_file,
+)
 from product_pilot.domain.product import ProductDraft
-from product_pilot.importers.xlsx import ProductWorkbookError, load_products_from_xlsx
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -159,84 +156,34 @@ def add_browser_arguments(parser: argparse.ArgumentParser, *, default_url: str, 
 
 
 def validate_product(path: Path) -> int:
-    products = load_products_file(path)
-    if products is None:
-        return 2
+    result = validate_product_file(path)
+    if result.load_error:
+        print(result.load_error, file=sys.stderr)
+        return result.exit_code
 
-    base_dir = path.resolve().parent
-    errors = validate_loaded_products(products, base_dir)
-    if errors:
-        for error in errors:
+    if result.errors:
+        for error in result.errors:
             print(error, file=sys.stderr)
-        return 1
+        return result.exit_code
 
     print("ok")
-    return 0
+    return result.exit_code
 
 
 def load_products_file(path: Path) -> list[ProductDraft] | None:
-    if path.suffix.lower() == ".xlsx":
-        try:
-            return load_products_from_xlsx(path)
-        except ProductWorkbookError as exc:
-            print(str(exc), file=sys.stderr)
-            return None
-    if path.suffix.lower() != ".json":
-        print(f"unsupported product file type: {path.suffix or '<none>'}", file=sys.stderr)
+    products, error = load_products_file_result(path)
+    if error:
+        print(error, file=sys.stderr)
         return None
-
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        print(f"file not found: {path}", file=sys.stderr)
-        return None
-    except json.JSONDecodeError as exc:
-        print(f"invalid json: {exc}", file=sys.stderr)
-        return None
-
-    return [ProductDraft.from_mapping(payload)]
+    return products
 
 
 def load_product_file(path: Path) -> ProductDraft | None:
-    products = load_products_file(path)
-    if products is None:
+    product, error = load_single_product_file(path)
+    if error:
+        print(error, file=sys.stderr)
         return None
-    if len(products) != 1:
-        print(f"expected exactly one product, found {len(products)}", file=sys.stderr)
-        return None
-    return products[0]
-
-
-def validate_loaded_products(products: list[ProductDraft], base_dir: Path) -> list[str]:
-    errors: list[str] = []
-    for index, product in enumerate(products, start=1):
-        product_errors = product.validate()
-        product_errors.extend(validate_product_assets(product, base_dir))
-        if len(products) == 1:
-            errors.extend(product_errors)
-        else:
-            label = product.product_id or str(index)
-            errors.extend(f"products[{label}].{error}" for error in product_errors)
-    return errors
-
-
-def validate_product_assets(product: ProductDraft, base_dir: Path) -> list[str]:
-    errors: list[str] = []
-    for index, image in enumerate(product.images, start=1):
-        if str(image.path) in {"", "."}:
-            continue
-        image_path = resolve_product_asset_path(base_dir, image.path)
-        if not image_path.exists():
-            errors.append(f"images[{index}].image.path file not found: {image_path}")
-        elif not image_path.is_file():
-            errors.append(f"images[{index}].image.path is not a file: {image_path}")
-    return errors
-
-
-def resolve_product_asset_path(base_dir: Path, path: Path) -> Path:
-    if path.is_absolute():
-        return path
-    return (base_dir / path).resolve()
+    return product
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -267,13 +214,11 @@ def browser_check(args: argparse.Namespace) -> int:
     )
 
     try:
-        with PersistentBrowserSession(config) as session:
-            session.open_backend()
-            if args.hold:
-                wait_for_user("Complete manual login in the opened browser, then press Enter to check status...")
-            result = session.check_login()
-            if args.keep_open:
-                wait_for_user("Press Enter to close the browser...")
+        result = run_browser_login_check(
+            config,
+            hold_callback=wait_for_user if args.hold else None,
+            keep_open_callback=wait_for_user if args.keep_open else None,
+        )
     except BrowserAutomationError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -283,11 +228,7 @@ def browser_check(args: argparse.Namespace) -> int:
     print(f"url: {result.login.snapshot.url}")
     print(f"screenshot: {result.screenshot_path.resolve()}")
 
-    if result.login.state == LoginState.LOGGED_IN:
-        return 0
-    if result.login.state == LoginState.LOGIN_REQUIRED:
-        return 1
-    return 3
+    return browser_login_exit_code(result)
 
 
 def publish_page_check(args: argparse.Namespace) -> int:
@@ -302,13 +243,11 @@ def publish_page_check(args: argparse.Namespace) -> int:
     )
 
     try:
-        with PersistentBrowserSession(config) as session:
-            session.open_backend()
-            if args.hold:
-                wait_for_user("Complete manual login or risk checks in the opened browser, then press Enter...")
-            result = session.check_publish_page()
-            if args.keep_open:
-                wait_for_user("Press Enter to close the browser...")
+        result = run_publish_page_check(
+            config,
+            hold_callback=wait_for_user if args.hold else None,
+            keep_open_callback=wait_for_user if args.keep_open else None,
+        )
     except BrowserAutomationError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -318,14 +257,7 @@ def publish_page_check(args: argparse.Namespace) -> int:
     print(f"url: {result.publish_page.snapshot.url}")
     print(f"screenshot: {result.screenshot_path.resolve()}")
 
-    if result.publish_page.state == PublishPageState.READY:
-        return 0
-    if result.publish_page.state in {
-        PublishPageState.LOGIN_REQUIRED,
-        PublishPageState.RISK_CHECK_REQUIRED,
-    }:
-        return 1
-    return 3
+    return publish_page_exit_code(result)
 
 
 def field_scan(args: argparse.Namespace) -> int:
@@ -422,60 +354,6 @@ def print_field_scan_result(result: Any, output_path: Path) -> None:
 
 
 def draft_spike(args: argparse.Namespace) -> int:
-    default_draft = DraftSpikeData()
-    product_base_dir = Path.cwd()
-    product = None
-    if args.product is not None:
-        product = load_product_file(args.product)
-        if product is None:
-            return 2
-        errors = product.validate()
-        if errors:
-            for error in errors:
-                print(error, file=sys.stderr)
-            return 1
-        product_base_dir = args.product.resolve().parent
-        asset_errors = validate_product_assets(product, product_base_dir)
-        if asset_errors:
-            for error in asset_errors:
-                print(error, file=sys.stderr)
-            return 2
-        default_draft = draft_data_from_product(product)
-
-    if args.main_image is not None:
-        main_image = args.main_image
-    elif product is not None:
-        main_image = resolve_product_asset_path(product_base_dir, main_image_from_product(product).path)
-    else:
-        print("main image is required unless --product is provided", file=sys.stderr)
-        return 2
-
-    main_image = main_image.resolve()
-    if not main_image.exists():
-        print(f"main image not found: {main_image}", file=sys.stderr)
-        return 2
-    extra_main_images: tuple[Path, ...] = ()
-    detail_images: tuple[Path, ...] = ()
-    sku_images: tuple[SkuImageUpload, ...] = ()
-    if product is not None:
-        product_main_images = tuple(
-            resolve_product_asset_path(product_base_dir, image.path)
-            for image in images_from_product(product, "main")
-        )
-        extra_main_images = tuple(path for path in product_main_images if path != main_image)
-        detail_images = tuple(
-            resolve_product_asset_path(product_base_dir, image.path)
-            for image in images_from_product(product, "detail")
-        )
-        sku_images = tuple(
-            SkuImageUpload(
-                path=resolve_product_asset_path(product_base_dir, image.path),
-                sku_attribute=image.sku_attribute,
-                sku_value=image.sku_value,
-            )
-            for image in images_from_product(product, "sku")
-        )
-
     config = BrowserLaunchConfig(
         backend_url=args.url,
         user_data_dir=args.profile_dir,
@@ -485,134 +363,49 @@ def draft_spike(args: argparse.Namespace) -> int:
         timeout_ms=args.timeout_ms,
         slow_mo_ms=args.slow_mo_ms,
     )
-    data = DraftSpikeData(
-        title=args.title or default_draft.title,
-        skus=_resolve_draft_skus(args, default_draft),
-        reference_price=Decimal(
-            str(args.reference_price if args.reference_price is not None else default_draft.reference_price)
-        ),
-        product_code=default_draft.product_code,
+    request = DraftSpikeRequest(
+        product_path=args.product,
+        main_image=args.main_image,
+        category_path=args.category_path,
+        title=args.title,
+        size=args.size,
+        stock=args.stock,
+        group_price=args.group_price,
+        single_price=args.single_price,
+        reference_price=args.reference_price,
+        no_save=args.no_save,
     )
 
     try:
-        session = PersistentBrowserSession(config).__enter__()
-        try:
-            session.open_backend()
-            if args.hold:
-                wait_for_user("Complete manual login or risk checks in the opened browser, then press Enter...")
-
-            page_check = session.check_publish_page()
-            if page_check.publish_page.state != PublishPageState.READY:
-                print(f"state: {page_check.publish_page.state.value}")
-                print(f"reason: {page_check.publish_page.reason}")
-                print(f"url: {page_check.publish_page.snapshot.url}")
-                print(f"screenshot: {page_check.screenshot_path.resolve()}")
-                if args.keep_open:
-                    wait_for_user("Press Enter to close the browser...")
-                return 1
-
-            notes: list[str] = []
-            session.page.locator("input[type=file]").first.set_input_files(str(main_image))
-            wait_for_uploads_to_settle(session.page)
-
-            category_value = args.category_path
-            if category_value is None and product is not None:
-                category_value = product.category
-            if category_value is None:
-                category_value = format_category_path(DEFAULT_CATEGORY_PATH)
-            category_path = parse_category_path(category_value)
-            category_result = select_category(session.page, category_path)
-            notes.extend(category_result.notes)
-            session.wait(2_000)
-
-            click_next_product_info(session.page, notes, timeout=10_000)
-            session.wait(8_000)
-
-            notes.extend(fill_minimal_draft_fields(session.page, data, sku_images=sku_images))
-            upload_notes, upload_targets = upload_extra_images(
-                session.page,
-                main_images=extra_main_images,
-                detail_images=detail_images,
-                sku_images=tuple(
-                    image.path
-                    for image in sku_images
-                    if image.sku_attribute != "颜色分类"
-                ),
-            )
-            notes.extend(upload_notes)
-            if args.no_save:
-                notes.append("save skipped by --no-save")
-                saved = False
-            else:
-                notes.extend(save_draft(session.page))
-                saved = detect_draft_saved(session.page)
-            screenshot_path = session.take_screenshot("draft-spike")
-            output_path = screenshot_path.with_suffix(".json")
-            output_path.write_text(
-                json.dumps(
-                    {
-                        "url": session.page.url,
-                        "saved": saved,
-                        "no_save": args.no_save,
-                        "notes": notes,
-                        "upload_targets": [target.to_mapping() for target in upload_targets],
-                        "screenshot_path": str(screenshot_path),
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-
-            print(f"saved: {saved}")
-            print(f"url: {session.page.url}")
-            print("notes:")
-            for note in notes:
-                print(f"- {note.splitlines()[0]}")
-            print(f"screenshot: {screenshot_path.resolve()}")
-            print(f"json: {output_path.resolve()}")
-            if args.keep_open:
-                wait_for_user("Press Enter to close the browser...")
-        except BrowserAutomationError:
-            raise
-        except Exception as exc:
-            print(f"draft spike failed: {exc}", file=sys.stderr)
-            try:
-                error_screenshot_path = session.take_screenshot("draft-spike-error")
-            except Exception as screenshot_exc:
-                print(f"error screenshot failed: {screenshot_exc}", file=sys.stderr)
-            else:
-                print(f"screenshot: {error_screenshot_path.resolve()}")
-            if args.keep_open:
-                wait_for_user(
-                    "Automation stopped. If a verification is visible, handle it in the browser, "
-                    "then press Enter to close the browser..."
-                )
-            return 1
-        finally:
-            session.close()
+        result = run_draft_spike(
+            config,
+            request,
+            hold_callback=wait_for_user if args.hold else None,
+            keep_open_callback=wait_for_user if args.keep_open else None,
+        )
+    except DraftSpikePageNotReadyError as exc:
+        print(f"state: {exc.state.value}")
+        print(f"reason: {exc.reason}")
+        print(f"url: {exc.url}")
+        print(f"screenshot: {exc.screenshot_path.resolve()}")
+        return exc.exit_code
+    except ProductPilotAppError as exc:
+        print(str(exc), file=sys.stderr)
+        if exc.screenshot_path is not None:
+            print(f"screenshot: {exc.screenshot_path.resolve()}")
+        return exc.exit_code
     except BrowserAutomationError as exc:
         print(str(exc), file=sys.stderr)
         return 2
 
-    return 0 if saved or args.no_save else 1
-
-
-def _resolve_draft_skus(args: argparse.Namespace, default_draft: DraftSpikeData) -> tuple[DraftSkuData, ...]:
-    if any(value is not None for value in (args.size, args.stock, args.group_price, args.single_price)):
-        first_sku = default_draft.skus[0]
-        return (
-            DraftSkuData(
-                size=args.size or first_sku.size,
-                stock=args.stock if args.stock is not None else first_sku.stock,
-                group_price=Decimal(str(args.group_price if args.group_price is not None else first_sku.group_price)),
-                single_price=Decimal(
-                    str(args.single_price if args.single_price is not None else first_sku.single_price)
-                ),
-            ),
-        )
-
-    return default_draft.skus
+    print(f"saved: {result.saved}")
+    print(f"url: {result.url}")
+    print("notes:")
+    for note in result.notes:
+        print(f"- {note.splitlines()[0]}")
+    print(f"screenshot: {result.screenshot_path.resolve()}")
+    print(f"json: {result.output_path.resolve()}")
+    return result.exit_code
 
 
 def wait_for_user(prompt: str) -> None:

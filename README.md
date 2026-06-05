@@ -14,6 +14,7 @@ Implemented so far:
 - Persistent Chrome/Chromium profile launch configuration.
 - Merchant backend login-state detection.
 - Browser screenshot artifact output.
+- Minimal PySide6 desktop shell for product validation, login check, and single-product draft runs.
 
 ## Product Validation
 
@@ -99,6 +100,22 @@ Verify field filling without saving:
 ```bash
 python3 -m product_pilot.cli draft-spike --product examples/product.sku06.json --no-save --keep-open
 ```
+
+## Desktop UI
+
+Install the desktop optional dependency:
+
+```bash
+python3 -m pip install -e '.[desktop,automation]'
+```
+
+Start the desktop shell:
+
+```bash
+product-pilot-desktop
+```
+
+The first desktop MVP supports selecting a product JSON/XLSX file, validating product data, opening the merchant backend for manual login checks, and running the single-product draft spike. Batch task queues, resume support, and OCR diagnostics are planned for later stages.
 
 ## Quick Check
 

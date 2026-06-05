@@ -27,6 +27,7 @@ dev = [
 
 [project.scripts]
 product-pilot = "product_pilot.cli:main"
+product-pilot-desktop = "product_pilot.desktop.main:main"
 
 [build-system]
 requires = ["hatchling"]
