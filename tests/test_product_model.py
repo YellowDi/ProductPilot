@@ -18,6 +18,28 @@ class ProductDraftTests(unittest.TestCase):
 
         self.assertEqual(product.validate(), [])
 
+    def test_parses_optional_sku_prices(self) -> None:
+        product = ProductDraft.from_mapping(
+            {
+                "title": "Test Product",
+                "category": "default-category",
+                "images": [{"path": "images/main.jpg", "role": "main"}],
+                "skus": [
+                    {
+                        "name": "42",
+                        "price": "29.90",
+                        "single_price": "39.90",
+                        "reference_price": "99.00",
+                        "stock": 10,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(product.validate(), [])
+        self.assertEqual(str(product.skus[0].single_price), "39.90")
+        self.assertEqual(str(product.skus[0].reference_price), "99.00")
+
     def test_requires_main_image(self) -> None:
         product = ProductDraft.from_mapping(
             {
@@ -45,7 +67,26 @@ class ProductDraftTests(unittest.TestCase):
         self.assertIn("skus[1].sku.price must be greater than 0: <empty>", errors)
         self.assertIn("skus[1].sku.stock must be greater than or equal to 0: <empty>", errors)
 
+    def test_rejects_reference_price_below_single_price(self) -> None:
+        product = ProductDraft.from_mapping(
+            {
+                "title": "Test Product",
+                "category": "default-category",
+                "images": [{"path": "images/main.jpg", "role": "main"}],
+                "skus": [
+                    {
+                        "name": "42",
+                        "price": "29.90",
+                        "single_price": "39.90",
+                        "reference_price": "39.90",
+                        "stock": 10,
+                    }
+                ],
+            }
+        )
+
+        self.assertIn("skus[1].sku.reference_price must be greater than single price: 42", product.validate())
+
 
 if __name__ == "__main__":
     unittest.main()
-

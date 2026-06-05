@@ -7,6 +7,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from product_pilot.domain.product import ProductDraft, ProductImage, ProductSku
+
 
 @dataclass(frozen=True)
 class DraftSpikeData:
@@ -32,6 +34,27 @@ class DraftSpikeResult:
             "notes": self.notes,
             "screenshot_path": str(self.screenshot_path),
         }
+
+
+def draft_data_from_product(product: ProductDraft) -> DraftSpikeData:
+    sku = _primary_sku(product)
+    single_price = sku.single_price if sku.single_price is not None else sku.price
+    reference_price = sku.reference_price if sku.reference_price is not None else single_price + Decimal("1.00")
+    return DraftSpikeData(
+        title=product.title,
+        size=sku.name,
+        stock=sku.stock,
+        group_price=sku.price,
+        single_price=single_price,
+        reference_price=reference_price,
+    )
+
+
+def main_image_from_product(product: ProductDraft) -> ProductImage:
+    for image in product.images:
+        if image.role == "main":
+            return image
+    raise ValueError("product has no main image")
 
 
 def fill_minimal_draft_fields(page: Any, data: DraftSpikeData) -> list[str]:
@@ -126,3 +149,8 @@ def fill_first_placeholder(page: Any, placeholder: str, value: str) -> None:
 def _format_decimal(value: Decimal) -> str:
     return f"{value:.2f}"
 
+
+def _primary_sku(product: ProductDraft) -> ProductSku:
+    if not product.skus:
+        raise ValueError("product has no sku")
+    return product.skus[0]

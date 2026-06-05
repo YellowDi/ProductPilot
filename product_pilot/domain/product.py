@@ -34,6 +34,8 @@ class ProductSku:
     name: str
     price: Decimal
     stock: int
+    single_price: Decimal | None = None
+    reference_price: Decimal | None = None
 
     @classmethod
     def from_mapping(cls, payload: dict[str, Any]) -> "ProductSku":
@@ -41,6 +43,8 @@ class ProductSku:
             name=str(payload.get("name", "")).strip(),
             price=_to_decimal(payload.get("price")),
             stock=_to_int(payload.get("stock")),
+            single_price=_to_optional_decimal(payload.get("single_price")),
+            reference_price=_to_optional_decimal(payload.get("reference_price")),
         )
 
     def validate(self) -> list[str]:
@@ -51,6 +55,14 @@ class ProductSku:
             errors.append(f"sku.price must be greater than 0: {self.name or '<empty>'}")
         if self.stock < 0:
             errors.append(f"sku.stock must be greater than or equal to 0: {self.name or '<empty>'}")
+        if self.single_price is not None and self.single_price <= Decimal("0"):
+            errors.append(f"sku.single_price must be greater than 0: {self.name or '<empty>'}")
+        if self.reference_price is not None and self.reference_price <= Decimal("0"):
+            errors.append(f"sku.reference_price must be greater than 0: {self.name or '<empty>'}")
+        if self.reference_price is not None:
+            effective_single_price = self.single_price if self.single_price is not None else self.price
+            if self.reference_price <= effective_single_price:
+                errors.append(f"sku.reference_price must be greater than single price: {self.name or '<empty>'}")
         return errors
 
 
@@ -111,6 +123,12 @@ def _to_decimal(value: Any) -> Decimal:
         return Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError):
         return Decimal("0")
+
+
+def _to_optional_decimal(value: Any) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    return _to_decimal(value)
 
 
 def _to_int(value: Any) -> int:

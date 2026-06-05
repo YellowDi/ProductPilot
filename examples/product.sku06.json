@@ -1,0 +1,20 @@
+{
+  "title": "UNITY优妮蒂男鞋低帮板鞋舒适休闲鞋",
+  "category": "流行男鞋 > 低帮鞋 > 板鞋",
+  "description": "SKU06 draft automation fixture.",
+  "images": [
+    {
+      "path": "../SKU06.jpg",
+      "role": "main"
+    }
+  ],
+  "skus": [
+    {
+      "name": "42",
+      "price": "29.90",
+      "single_price": "39.90",
+      "reference_price": "99.00",
+      "stock": 10
+    }
+  ]
+}

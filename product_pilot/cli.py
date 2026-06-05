@@ -19,6 +19,8 @@ from product_pilot.automation.draft import (
     DraftSpikeData,
     detect_draft_saved,
     fill_minimal_draft_fields,
+    draft_data_from_product,
+    main_image_from_product,
     save_draft,
 )
 from product_pilot.automation.field_scan import scan_publish_fields
@@ -93,26 +95,24 @@ def build_parser() -> argparse.ArgumentParser:
         "draft-spike",
         help="Upload the test image, select the fixed category, fill minimal fields, and save a draft.",
     )
-    default_draft = DraftSpikeData()
     add_browser_arguments(
         draft_parser,
         default_url="https://mms.pinduoduo.com/goods/category",
         url_help="Product publish category page URL.",
     )
-    draft_parser.add_argument("--main-image", type=Path, required=True, help="Main carousel image to upload.")
+    draft_parser.add_argument("--product", type=Path, help="Product draft JSON file to use for this run.")
+    draft_parser.add_argument("--main-image", type=Path, help="Main carousel image to upload.")
     draft_parser.add_argument(
         "--category-path",
-        default=format_category_path(DEFAULT_CATEGORY_PATH),
-        help="Category path to select after image upload.",
+        help="Category path to select after image upload. Defaults to product.category or the fixed test category.",
     )
-    draft_parser.add_argument("--title", default=default_draft.title, help="Product title for the draft spike.")
-    draft_parser.add_argument("--size", default=default_draft.size, help="Single shoe size to enable.")
-    draft_parser.add_argument("--stock", type=int, default=default_draft.stock, help="Stock for the enabled SKU.")
-    draft_parser.add_argument("--group-price", default=str(default_draft.group_price), help="Pinduoduo group price.")
-    draft_parser.add_argument("--single-price", default=str(default_draft.single_price), help="Single-buy price.")
+    draft_parser.add_argument("--title", help="Product title for the draft spike.")
+    draft_parser.add_argument("--size", help="Single shoe size to enable.")
+    draft_parser.add_argument("--stock", type=int, help="Stock for the enabled SKU.")
+    draft_parser.add_argument("--group-price", help="Pinduoduo group price.")
+    draft_parser.add_argument("--single-price", help="Single-buy price.")
     draft_parser.add_argument(
         "--reference-price",
-        default=str(default_draft.reference_price),
         help="Reference price greater than the single-buy price.",
     )
     draft_parser.add_argument(
@@ -146,16 +146,10 @@ def add_browser_arguments(parser: argparse.ArgumentParser, *, default_url: str, 
 
 
 def validate_product(path: Path) -> int:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        print(f"file not found: {path}", file=sys.stderr)
-        return 2
-    except json.JSONDecodeError as exc:
-        print(f"invalid json: {exc}", file=sys.stderr)
+    product = load_product_file(path)
+    if product is None:
         return 2
 
-    product = ProductDraft.from_mapping(payload)
     errors = product.validate()
     if errors:
         for error in errors:
@@ -164,6 +158,19 @@ def validate_product(path: Path) -> int:
 
     print("ok")
     return 0
+
+
+def load_product_file(path: Path) -> ProductDraft | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        print(f"file not found: {path}", file=sys.stderr)
+        return None
+    except json.JSONDecodeError as exc:
+        print(f"invalid json: {exc}", file=sys.stderr)
+        return None
+
+    return ProductDraft.from_mapping(payload)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -349,7 +356,30 @@ def print_field_scan_result(result: Any, output_path: Path) -> None:
 
 
 def draft_spike(args: argparse.Namespace) -> int:
-    main_image = args.main_image.resolve()
+    default_draft = DraftSpikeData()
+    product_base_dir = Path.cwd()
+    product = None
+    if args.product is not None:
+        product = load_product_file(args.product)
+        if product is None:
+            return 2
+        errors = product.validate()
+        if errors:
+            for error in errors:
+                print(error, file=sys.stderr)
+            return 1
+        product_base_dir = args.product.resolve().parent
+        default_draft = draft_data_from_product(product)
+
+    if args.main_image is not None:
+        main_image = args.main_image
+    elif product is not None:
+        main_image = product_base_dir / main_image_from_product(product).path
+    else:
+        print("main image is required unless --product is provided", file=sys.stderr)
+        return 2
+
+    main_image = main_image.resolve()
     if not main_image.exists():
         print(f"main image not found: {main_image}", file=sys.stderr)
         return 2
@@ -364,12 +394,14 @@ def draft_spike(args: argparse.Namespace) -> int:
         slow_mo_ms=args.slow_mo_ms,
     )
     data = DraftSpikeData(
-        title=args.title,
-        size=args.size,
-        stock=args.stock,
-        group_price=Decimal(str(args.group_price)),
-        single_price=Decimal(str(args.single_price)),
-        reference_price=Decimal(str(args.reference_price)),
+        title=args.title or default_draft.title,
+        size=args.size or default_draft.size,
+        stock=args.stock if args.stock is not None else default_draft.stock,
+        group_price=Decimal(str(args.group_price if args.group_price is not None else default_draft.group_price)),
+        single_price=Decimal(str(args.single_price if args.single_price is not None else default_draft.single_price)),
+        reference_price=Decimal(
+            str(args.reference_price if args.reference_price is not None else default_draft.reference_price)
+        ),
     )
 
     try:
@@ -392,7 +424,12 @@ def draft_spike(args: argparse.Namespace) -> int:
             session.page.locator("input[type=file]").first.set_input_files(str(main_image))
             session.wait(10_000)
 
-            category_path = parse_category_path(args.category_path)
+            category_value = args.category_path
+            if category_value is None and product is not None:
+                category_value = product.category
+            if category_value is None:
+                category_value = format_category_path(DEFAULT_CATEGORY_PATH)
+            category_path = parse_category_path(category_value)
             category_result = select_category(session.page, category_path)
             notes.extend(category_result.notes)
             session.wait(2_000)
