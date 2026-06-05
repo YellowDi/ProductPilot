@@ -72,17 +72,17 @@ def classify_login_snapshot(snapshot: LoginSnapshot) -> LoginCheckResult:
             snapshot=snapshot,
         )
 
-    if any(marker in normalized_url for marker in LOGIN_URL_MARKERS):
-        return LoginCheckResult(
-            state=LoginState.LOGIN_REQUIRED,
-            reason="url looks like a login page",
-            snapshot=snapshot,
-        )
-
     if any(marker in body_text for marker in AUTH_TEXT_MARKERS):
         return LoginCheckResult(
             state=LoginState.LOGGED_IN,
             reason="merchant backend navigation text is present",
+            snapshot=snapshot,
+        )
+
+    if any(marker in normalized_url for marker in LOGIN_URL_MARKERS):
+        return LoginCheckResult(
+            state=LoginState.LOGIN_REQUIRED,
+            reason="url looks like a login page",
             snapshot=snapshot,
         )
 
@@ -119,4 +119,3 @@ def _safe_has_password_input(page: Any) -> bool:
         return page.locator("input[type='password']").count() > 0
     except Exception:
         return False
-

@@ -8,6 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from product_pilot.automation.login import LoginCheckResult, read_login_snapshot, classify_login_snapshot
+from product_pilot.automation.publish import (
+    PUBLISH_PAGE_LOAD_MARKERS,
+    PublishPageCheckResult,
+    classify_publish_page_snapshot,
+    read_publish_page_snapshot,
+)
 
 
 class BrowserAutomationError(RuntimeError):
@@ -42,6 +48,12 @@ class BrowserLaunchConfig:
 @dataclass(frozen=True)
 class BrowserCheckResult:
     login: LoginCheckResult
+    screenshot_path: Path
+
+
+@dataclass(frozen=True)
+class PublishPageBrowserCheckResult:
+    publish_page: PublishPageCheckResult
     screenshot_path: Path
 
 
@@ -110,13 +122,16 @@ class PersistentBrowserSession:
         self.page = None
 
     def open_backend(self) -> None:
+        self.open_url(self._config.backend_url)
+
+    def open_url(self, url: str) -> None:
         if self.page is None:
             raise BrowserAutomationError("browser session is not started")
 
         try:
-            self.page.goto(self._config.backend_url, wait_until="domcontentloaded")
+            self.page.goto(url, wait_until="domcontentloaded")
         except Exception as exc:
-            raise BrowserAutomationError(f"failed to open backend url: {exc}") from exc
+            raise BrowserAutomationError(f"failed to open url: {exc}") from exc
 
     def check_login(self) -> BrowserCheckResult:
         if self.page is None:
@@ -132,6 +147,37 @@ class PersistentBrowserSession:
             raise BrowserAutomationError(f"failed to check login state: {exc}") from exc
 
         return BrowserCheckResult(login=login, screenshot_path=screenshot_path)
+
+    def check_publish_page(self) -> PublishPageBrowserCheckResult:
+        if self.page is None:
+            raise BrowserAutomationError("browser session is not started")
+
+        try:
+            self._wait_for_body_markers(PUBLISH_PAGE_LOAD_MARKERS)
+            snapshot = read_publish_page_snapshot(self.page)
+            publish_page = classify_publish_page_snapshot(snapshot)
+            screenshot_path = self.take_screenshot("publish-page-check")
+        except BrowserAutomationError:
+            raise
+        except Exception as exc:
+            raise BrowserAutomationError(f"failed to check publish page state: {exc}") from exc
+
+        return PublishPageBrowserCheckResult(
+            publish_page=publish_page,
+            screenshot_path=screenshot_path,
+        )
+
+    def _wait_for_body_markers(self, markers: tuple[str, ...]) -> None:
+        if self.page is None:
+            raise BrowserAutomationError("browser session is not started")
+
+        self.page.wait_for_function(
+            """markers => {
+                const text = document.body ? document.body.innerText : "";
+                return markers.some(marker => text.includes(marker));
+            }""",
+            arg=list(markers),
+        )
 
     def take_screenshot(self, name: str) -> Path:
         if self.page is None:

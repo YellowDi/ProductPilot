@@ -13,6 +13,7 @@ from product_pilot.automation.browser import (
     PersistentBrowserSession,
 )
 from product_pilot.automation.login import LoginState
+from product_pilot.automation.publish import PublishPageState
 from product_pilot.domain.product import ProductDraft
 
 
@@ -50,6 +51,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep the browser open for manual login before checking status.",
     )
 
+    publish_parser = subparsers.add_parser(
+        "publish-page-check",
+        help="Open the product publish category page and check whether it is ready for automation.",
+    )
+    publish_parser.add_argument(
+        "--url",
+        default="https://mms.pinduoduo.com/goods/category",
+        help="Product publish category page URL.",
+    )
+    publish_parser.add_argument(
+        "--profile-dir",
+        type=Path,
+        default=Path("profiles/chrome"),
+        help="Chrome/Chromium user data directory for persistent login state.",
+    )
+    publish_parser.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        default=Path("artifacts/browser"),
+        help="Directory for screenshots and future trace artifacts.",
+    )
+    publish_parser.add_argument("--channel", default="chrome", help="Playwright browser channel.")
+    publish_parser.add_argument("--headless", action="store_true", help="Run browser in headless mode.")
+    publish_parser.add_argument("--timeout-ms", type=int, default=30_000, help="Default Playwright timeout.")
+    publish_parser.add_argument("--slow-mo-ms", type=int, default=0, help="Slow down browser actions.")
+    publish_parser.add_argument(
+        "--hold",
+        action="store_true",
+        help="Keep the browser open for manual login or risk checks before checking status.",
+    )
+
     return parser
 
 
@@ -80,6 +112,8 @@ def main(argv: list[str] | None = None) -> int:
         return validate_product(args.path)
     if args.command == "browser-check":
         return browser_check(args)
+    if args.command == "publish-page-check":
+        return publish_page_check(args)
 
     raise AssertionError(f"unsupported command: {args.command}")
 
@@ -113,6 +147,42 @@ def browser_check(args: argparse.Namespace) -> int:
     if result.login.state == LoginState.LOGGED_IN:
         return 0
     if result.login.state == LoginState.LOGIN_REQUIRED:
+        return 1
+    return 3
+
+
+def publish_page_check(args: argparse.Namespace) -> int:
+    config = BrowserLaunchConfig(
+        backend_url=args.url,
+        user_data_dir=args.profile_dir,
+        artifacts_dir=args.artifacts_dir,
+        channel=args.channel,
+        headless=args.headless,
+        timeout_ms=args.timeout_ms,
+        slow_mo_ms=args.slow_mo_ms,
+    )
+
+    try:
+        with PersistentBrowserSession(config) as session:
+            session.open_backend()
+            if args.hold:
+                input("Complete manual login or risk checks in the opened browser, then press Enter...")
+            result = session.check_publish_page()
+    except BrowserAutomationError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    print(f"state: {result.publish_page.state.value}")
+    print(f"reason: {result.publish_page.reason}")
+    print(f"url: {result.publish_page.snapshot.url}")
+    print(f"screenshot: {result.screenshot_path.resolve()}")
+
+    if result.publish_page.state == PublishPageState.READY:
+        return 0
+    if result.publish_page.state in {
+        PublishPageState.LOGIN_REQUIRED,
+        PublishPageState.RISK_CHECK_REQUIRED,
+    }:
         return 1
     return 3
 

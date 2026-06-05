@@ -30,6 +30,18 @@ class LoginClassifierTests(unittest.TestCase):
 
         self.assertEqual(result.state, LoginState.LOGIN_REQUIRED)
 
+    def test_backend_markers_win_over_stale_login_url(self) -> None:
+        result = classify_login_snapshot(
+            LoginSnapshot(
+                url="https://mms.pinduoduo.com/login/?redirectUrl=https%3A%2F%2Fmms.pinduoduo.com%2F",
+                title="拼多多 商家后台",
+                body_text="后台首页 商品管理 发布商品 订单 店铺",
+                has_password_input=False,
+            )
+        )
+
+        self.assertEqual(result.state, LoginState.LOGGED_IN)
+
     def test_backend_navigation_marks_logged_in(self) -> None:
         result = classify_login_snapshot(
             LoginSnapshot(
@@ -57,4 +69,3 @@ class LoginClassifierTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

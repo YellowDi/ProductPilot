@@ -38,6 +38,22 @@ python3 -m product_pilot.cli browser-check --hold
 
 The `--hold` flag keeps the browser open so login, captcha, or risk checks can be completed manually. After pressing Enter in the terminal, the command checks whether the backend appears logged in and writes a screenshot under `artifacts/browser`.
 
+## Publish Page Check
+
+After login is persisted in the profile, open the product publish category page:
+
+```bash
+python3 -m product_pilot.cli publish-page-check
+```
+
+Use `--hold` when the page shows a slider, captcha, or other manual risk check:
+
+```bash
+python3 -m product_pilot.cli publish-page-check --hold
+```
+
+This command only detects page readiness and writes a screenshot. It does not upload images, fill product data, save drafts, or publish listings.
+
 ## Quick Check
 
 ```bash
