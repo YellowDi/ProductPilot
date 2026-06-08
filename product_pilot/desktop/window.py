@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from threading import Event
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 from PySide6.QtGui import QCloseEvent
@@ -95,6 +96,7 @@ class DropPathLineEdit(QLineEdit):
 
 class DraftSpikeWorker(QObject):
     log = Signal(str)
+    manual_action_required = Signal(str)
     succeeded = Signal(object)
     failed = Signal(object)
     finished = Signal()
@@ -103,12 +105,17 @@ class DraftSpikeWorker(QObject):
         super().__init__()
         self._config = config
         self._request = request
+        self._manual_action_done = Event()
 
     @Slot()
     def run(self) -> None:
         self.log.emit("开始执行草稿流程")
         try:
-            result = run_draft_spike(self._config, self._request)
+            result = run_draft_spike(
+                self._config,
+                self._request,
+                manual_check_callback=self._wait_for_manual_action,
+            )
         except Exception as exc:
             self.failed.emit(exc)
         else:
@@ -116,9 +123,18 @@ class DraftSpikeWorker(QObject):
         finally:
             self.finished.emit()
 
+    def continue_after_manual_action(self) -> None:
+        self._manual_action_done.set()
+
+    def _wait_for_manual_action(self, message: str) -> None:
+        self._manual_action_done.clear()
+        self.manual_action_required.emit(message)
+        self._manual_action_done.wait()
+
 
 class BatchDraftWorker(QObject):
     log = Signal(str)
+    manual_action_required = Signal(str)
     item_started = Signal(int)
     item_succeeded = Signal(int, object)
     item_failed = Signal(int, object)
@@ -128,6 +144,7 @@ class BatchDraftWorker(QObject):
         super().__init__()
         self._config = config
         self._requests = requests
+        self._manual_action_done = Event()
 
     @Slot()
     def run(self) -> None:
@@ -136,13 +153,25 @@ class BatchDraftWorker(QObject):
                 self.item_started.emit(index)
                 self.log.emit(f"开始执行批次商品 {index + 1}/{len(self._requests)}")
                 try:
-                    result = run_draft_spike(self._config, request)
+                    result = run_draft_spike(
+                        self._config,
+                        request,
+                        manual_check_callback=self._wait_for_manual_action,
+                    )
                 except Exception as exc:
                     self.item_failed.emit(index, exc)
                     break
                 self.item_succeeded.emit(index, result)
         finally:
             self.finished.emit()
+
+    def continue_after_manual_action(self) -> None:
+        self._manual_action_done.set()
+
+    def _wait_for_manual_action(self, message: str) -> None:
+        self._manual_action_done.clear()
+        self.manual_action_required.emit(message)
+        self._manual_action_done.wait()
 
 
 @dataclass
@@ -587,9 +616,8 @@ class MainWindow(QMainWindow):
             self._append_log("草稿流程正在运行")
             return
         if self._browser_session is not None:
-            self._append_log("请先关闭登录浏览器，再运行草稿流程")
-            QMessageBox.warning(self, "浏览器已打开", "请先关闭登录浏览器，再运行草稿流程。")
-            return
+            self._append_log("运行前关闭登录浏览器会话")
+            self._close_login_browser()
 
         result = self._validation_result
         path = self._product_file_path()
@@ -620,6 +648,7 @@ class MainWindow(QMainWindow):
         self._draft_worker.moveToThread(self._draft_thread)
         self._draft_thread.started.connect(self._draft_worker.run)
         self._draft_worker.log.connect(self._append_log)
+        self._draft_worker.manual_action_required.connect(self._handle_manual_action_required)
         self._draft_worker.succeeded.connect(self._handle_draft_success)
         self._draft_worker.failed.connect(self._handle_draft_failure)
         self._draft_worker.finished.connect(self._draft_thread.quit)
@@ -635,9 +664,8 @@ class MainWindow(QMainWindow):
             self._append_log("草稿流程正在运行")
             return
         if self._browser_session is not None:
-            self._append_log("请先关闭登录浏览器，再运行批量草稿流程")
-            QMessageBox.warning(self, "浏览器已打开", "请先关闭登录浏览器，再运行批量草稿流程。")
-            return
+            self._append_log("运行前关闭登录浏览器会话")
+            self._close_login_browser()
         if not self._batch_items:
             self._append_log("批次为空")
             QMessageBox.warning(self, "批次为空", "请先导入或加入商品资料。")
@@ -669,6 +697,7 @@ class MainWindow(QMainWindow):
         self._draft_worker.moveToThread(self._draft_thread)
         self._draft_thread.started.connect(self._draft_worker.run)
         self._draft_worker.log.connect(self._append_log)
+        self._draft_worker.manual_action_required.connect(self._handle_manual_action_required)
         self._draft_worker.item_started.connect(
             lambda worker_index: self._handle_batch_item_started(runnable_items[worker_index][0])
         )
@@ -717,6 +746,17 @@ class MainWindow(QMainWindow):
 
         self._append_log(f"草稿流程失败：{exc}")
         QMessageBox.warning(self, "草稿流程失败", str(exc))
+
+    def _handle_manual_action_required(self, message: str) -> None:
+        self._append_log("等待人工处理人机验证")
+        QMessageBox.information(
+            self,
+            "需要人工处理",
+            f"{message}\n\n完成后点击“确定”继续执行。",
+        )
+        worker = self._draft_worker
+        if worker is not None and hasattr(worker, "continue_after_manual_action"):
+            worker.continue_after_manual_action()
 
     def _handle_batch_item_started(self, batch_index: int) -> None:
         item = self._batch_items[batch_index]

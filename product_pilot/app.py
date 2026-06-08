@@ -37,7 +37,7 @@ from product_pilot.automation.draft import (
     wait_for_uploads_to_settle,
 )
 from product_pilot.automation.login import LoginState
-from product_pilot.automation.publish import PublishPageState
+from product_pilot.automation.publish import RISK_CHECK_MARKERS, PublishPageState
 from product_pilot.domain.product import ProductDraft
 from product_pilot.importers.xlsx import ProductWorkbookError, load_products_from_xlsx
 
@@ -266,6 +266,7 @@ def run_draft_spike(
     request: DraftSpikeRequest,
     *,
     hold_callback: WaitCallback | None = None,
+    manual_check_callback: WaitCallback | None = None,
     keep_open_callback: WaitCallback | None = None,
 ) -> DraftSpikeRunResult:
     prepared = _prepare_draft_spike_request(request)
@@ -277,7 +278,7 @@ def run_draft_spike(
             if hold_callback is not None:
                 hold_callback("Complete manual login or risk checks in the opened browser, then press Enter...")
 
-            page_check = session.check_publish_page()
+            page_check = _wait_for_publish_page_ready(session, manual_check_callback)
             if page_check.publish_page.state != PublishPageState.READY:
                 if keep_open_callback is not None:
                     keep_open_callback("Press Enter to close the browser...")
@@ -289,40 +290,88 @@ def run_draft_spike(
                 )
 
             notes: list[str] = []
-            session.page.locator("input[type=file]").first.set_input_files(str(prepared.main_image))
-            wait_for_uploads_to_settle(session.page)
+            _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "上传主图前")
+            _run_with_manual_check_retry(
+                "上传主图",
+                session.page,
+                manual_check_callback,
+                notes,
+                lambda: (
+                    session.page.locator("input[type=file]").first.set_input_files(str(prepared.main_image)),
+                    wait_for_uploads_to_settle(session.page),
+                ),
+            )
+            _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "上传主图后")
 
             category_path = parse_category_path(prepared.category_value)
-            category_result = select_category(session.page, category_path)
+            category_result = _run_with_manual_check_retry(
+                "选择类目",
+                session.page,
+                manual_check_callback,
+                notes,
+                lambda: select_category(session.page, category_path),
+            )
             notes.extend(category_result.notes)
             session.wait(2_000)
+            _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "选择类目后")
 
-            click_next_product_info(session.page, notes, timeout=10_000)
+            _run_with_manual_check_retry(
+                "进入商品信息页",
+                session.page,
+                manual_check_callback,
+                notes,
+                lambda: click_next_product_info(session.page, notes, timeout=10_000),
+            )
             session.wait(8_000)
+            _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "进入商品信息页后")
 
             notes.extend(
-                fill_minimal_draft_fields(
+                _run_with_manual_check_retry(
+                    "填写商品信息",
                     session.page,
-                    prepared.data,
-                    sku_images=prepared.sku_images,
+                    manual_check_callback,
+                    notes,
+                    lambda: fill_minimal_draft_fields(
+                        session.page,
+                        prepared.data,
+                        sku_images=prepared.sku_images,
+                    ),
                 )
             )
-            upload_notes, upload_targets = upload_extra_images(
+            _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "填写商品信息后")
+            upload_notes, upload_targets = _run_with_manual_check_retry(
+                "上传附加图片",
                 session.page,
-                main_images=prepared.extra_main_images,
-                detail_images=prepared.detail_images,
-                sku_images=tuple(
-                    image.path
-                    for image in prepared.sku_images
-                    if image.sku_attribute != "颜色分类"
+                manual_check_callback,
+                notes,
+                lambda: upload_extra_images(
+                    session.page,
+                    main_images=prepared.extra_main_images,
+                    detail_images=prepared.detail_images,
+                    sku_images=tuple(
+                        image.path
+                        for image in prepared.sku_images
+                        if image.sku_attribute != "颜色分类"
+                    ),
                 ),
             )
             notes.extend(upload_notes)
+            _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "上传附加图片后")
             if request.no_save:
                 notes.append("save skipped by --no-save")
                 saved = False
             else:
-                notes.extend(save_draft(session.page))
+                _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "保存草稿前")
+                notes.extend(
+                    _run_with_manual_check_retry(
+                        "保存草稿",
+                        session.page,
+                        manual_check_callback,
+                        notes,
+                        lambda: save_draft(session.page),
+                    )
+                )
+                _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "保存草稿后")
                 saved = detect_draft_saved(session.page)
 
             screenshot_path = session.take_screenshot("draft-spike")
@@ -378,6 +427,93 @@ def run_draft_spike(
             session.close()
     except BrowserAutomationError:
         raise
+
+
+def _wait_for_publish_page_ready(
+    session: PersistentBrowserSession,
+    manual_check_callback: WaitCallback | None,
+) -> PublishPageBrowserCheckResult:
+    result = session.check_publish_page()
+    attempts = 0
+    while (
+        result.publish_page.state in {PublishPageState.LOGIN_REQUIRED, PublishPageState.RISK_CHECK_REQUIRED}
+        and manual_check_callback is not None
+        and attempts < 20
+    ):
+        attempts += 1
+        manual_check_callback(
+            "拼多多页面需要人工处理登录或人机验证。"
+            "请在打开的 Chrome 中完成处理，确认页面回到发布商品流程后再继续。"
+        )
+        session.wait(2_000)
+        result = session.check_publish_page()
+    return result
+
+
+def _pause_for_manual_check_if_present(
+    page: object,
+    manual_check_callback: WaitCallback | None,
+    notes: list[str],
+    step: str,
+) -> None:
+    if manual_check_callback is None:
+        return
+
+    attempts = 0
+    while _page_has_manual_check(page) and attempts < 20:
+        attempts += 1
+        notes.append(f"manual verification paused at: {step}")
+        manual_check_callback(
+            f"检测到拼多多人机验证：{step}。"
+            "请在打开的 Chrome 中完成人机验证，页面恢复后再继续。"
+        )
+        try:
+            page.wait_for_timeout(1_000)
+        except Exception:
+            return
+
+
+def _run_with_manual_check_retry(
+    step: str,
+    page: object,
+    manual_check_callback: WaitCallback | None,
+    notes: list[str],
+    action: Callable[[], object],
+) -> object:
+    for attempt in range(3):
+        _pause_for_manual_check_if_present(page, manual_check_callback, notes, f"{step}前")
+        try:
+            return action()
+        except Exception:
+            if manual_check_callback is None or attempt == 2 or not _page_has_manual_check(page):
+                raise
+            notes.append(f"manual verification interrupted step: {step}")
+            manual_check_callback(
+                f"执行“{step}”时检测到拼多多人机验证。"
+                "请在打开的 Chrome 中完成人机验证，页面恢复后再继续。"
+            )
+            try:
+                page.wait_for_timeout(1_000)
+            except Exception:
+                raise
+
+    raise AssertionError("unreachable manual check retry state")
+
+
+def _page_has_manual_check(page: object) -> bool:
+    try:
+        text = str(page.locator("body").inner_text(timeout=2_000))
+    except Exception:
+        return False
+
+    extra_markers = (
+        "安全验证",
+        "人机验证",
+        "请完成验证",
+        "拖动滑块",
+        "验证码",
+    )
+    return any(marker in text for marker in (*RISK_CHECK_MARKERS, *extra_markers))
 
 
 def _prepare_draft_spike_request(request: DraftSpikeRequest) -> _PreparedDraftSpike:
