@@ -179,6 +179,7 @@ class MainWindow(QMainWindow):
         self.zzb_sku_text_edit.setPlaceholderText("粘贴至尊宝复制 SKU 文字")
         self.zzb_sku_text_edit.setMaximumHeight(120)
         self.import_zzb_button = QPushButton("导入并生成商品资料")
+        self.clear_zzb_button = QPushButton("清空导入信息")
 
         self.product_path_edit = QLineEdit()
         self.profile_dir_edit = QLineEdit("profiles/chrome")
@@ -239,7 +240,10 @@ class MainWindow(QMainWindow):
         zzb_output_button = QPushButton("选择")
         zzb_output_button.clicked.connect(lambda: self._browse_directory(self.zzb_output_dir_edit))
         zzb_layout.addWidget(zzb_output_button, 5, 4)
-        zzb_layout.addWidget(self.import_zzb_button, 5, 5)
+        zzb_button_row = QHBoxLayout()
+        zzb_button_row.addWidget(self.clear_zzb_button)
+        zzb_button_row.addWidget(self.import_zzb_button)
+        zzb_layout.addLayout(zzb_button_row, 5, 5)
         zzb_group.setLayout(zzb_layout)
         root.addWidget(zzb_group)
 
@@ -309,6 +313,7 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self) -> None:
         self.import_zzb_button.clicked.connect(self._import_zzb_product)
+        self.clear_zzb_button.clicked.connect(self._clear_zzb_inputs)
         self.validate_button.clicked.connect(self._validate_products)
         self.add_to_batch_button.clicked.connect(self._add_current_product_to_batch)
         self.open_login_button.clicked.connect(self._open_login_browser)
@@ -357,6 +362,14 @@ class MainWindow(QMainWindow):
         directory = QFileDialog.getExistingDirectory(self, "选择目录", target.text() or str(Path.cwd()))
         if directory:
             target.setText(directory)
+
+    def _clear_zzb_inputs(self) -> None:
+        self.zzb_excel_edit.clear()
+        self.zzb_media_edit.clear()
+        self.zzb_title_edit.clear()
+        self.zzb_product_code_edit.clear()
+        self.zzb_sku_text_edit.clear()
+        self._append_log("至尊宝导入信息已清空")
 
     def _import_zzb_product(self) -> None:
         excel_path = Path(self.zzb_excel_edit.text().strip()).expanduser()
@@ -785,6 +798,7 @@ class MainWindow(QMainWindow):
         self.add_to_batch_button.setEnabled(not running)
         self.clear_batch_button.setEnabled(not running)
         self.import_zzb_button.setEnabled(not running)
+        self.clear_zzb_button.setEnabled(not running)
         self.no_save_check.setEnabled(not running)
 
     def _append_log(self, message: str) -> None:
