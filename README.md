@@ -32,6 +32,29 @@ The delivery product input is an XLSX workbook. JSON remains available as a deve
 
 A multi-SKU starter workbook is available at `examples/product-template/product-input-multisku.xlsx`.
 
+## Zhizunbao Import
+
+The desktop app can convert Zhizunbao exports into ProductPilot's standard workbook. Provide the exported Excel file,
+paste the copied SKU text, and choose either the media zip or the extracted media folder. Zip files are extracted
+automatically into the generated import directory.
+
+The same conversion is available from the CLI:
+
+```bash
+python3 -B -m product_pilot.cli import-zzb \
+  --excel test/至尊宝_导出excel.xlsx \
+  --assets test/拼多多_商品ID_881133521557.zip \
+  --sku-text-file sku.txt \
+  --title "商品标题" \
+  --category "流行男鞋 > 商务鞋 > 正装皮鞋"
+```
+
+The command writes `imports/<商品ID>/product-input.xlsx`, which can then be validated or used by `draft-spike`.
+
+In the desktop app, each successful Zhizunbao import is added to the current batch table. Standard ProductPilot
+JSON/XLSX files can also be added to the batch manually. Use `批量创建草稿` to process pending batch items in order.
+The app creates or updates drafts only; final publish/submit remains a manual merchant-backend action.
+
 ## Browser Login Check
 
 Install the browser automation dependency first:

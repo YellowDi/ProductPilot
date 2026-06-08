@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -40,6 +41,56 @@ from product_pilot.automation.browser import (
     BrowserLaunchConfig,
     PersistentBrowserSession,
 )
+from product_pilot.importers.zzb import (
+    ZzbImportError,
+    ZzbImportRequest,
+    import_zzb_export,
+    suggest_zzb_output_path,
+)
+
+
+class DropPathLineEdit(QLineEdit):
+    def __init__(
+        self,
+        *,
+        allow_dirs: bool = False,
+        suffixes: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__()
+        self._allow_dirs = allow_dirs
+        self._suffixes = tuple(suffix.lower() for suffix in suffixes)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event: object) -> None:
+        if self._dropped_path(event) is None:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+
+    def dropEvent(self, event: object) -> None:
+        path = self._dropped_path(event)
+        if path is None:
+            event.ignore()
+            return
+        self.setText(str(path))
+        event.acceptProposedAction()
+
+    def _dropped_path(self, event: object) -> Path | None:
+        mime_data = event.mimeData()
+        if not mime_data.hasUrls():
+            return None
+        for url in mime_data.urls():
+            if not url.isLocalFile():
+                continue
+            path = Path(url.toLocalFile())
+            if path.is_dir():
+                if self._allow_dirs:
+                    return path
+                continue
+            if self._suffixes and path.suffix.lower() not in self._suffixes:
+                continue
+            return path
+        return None
 
 
 class DraftSpikeWorker(QObject):
@@ -66,6 +117,46 @@ class DraftSpikeWorker(QObject):
             self.finished.emit()
 
 
+class BatchDraftWorker(QObject):
+    log = Signal(str)
+    item_started = Signal(int)
+    item_succeeded = Signal(int, object)
+    item_failed = Signal(int, object)
+    finished = Signal()
+
+    def __init__(self, config: BrowserLaunchConfig, requests: tuple[DraftSpikeRequest, ...]) -> None:
+        super().__init__()
+        self._config = config
+        self._requests = requests
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            for index, request in enumerate(self._requests):
+                self.item_started.emit(index)
+                self.log.emit(f"开始执行批次商品 {index + 1}/{len(self._requests)}")
+                try:
+                    result = run_draft_spike(self._config, request)
+                except Exception as exc:
+                    self.item_failed.emit(index, exc)
+                    break
+                self.item_succeeded.emit(index, result)
+        finally:
+            self.finished.emit()
+
+
+@dataclass
+class BatchProductItem:
+    path: Path
+    product_id: str
+    title: str
+    category: str
+    sku_count: int
+    image_count: int
+    status: str = "待处理"
+    message: str = ""
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -73,9 +164,21 @@ class MainWindow(QMainWindow):
         self.resize(1040, 720)
 
         self._validation_result: ProductValidationResult | None = None
+        self._batch_items: list[BatchProductItem] = []
         self._browser_session: PersistentBrowserSession | None = None
         self._draft_thread: QThread | None = None
-        self._draft_worker: DraftSpikeWorker | None = None
+        self._draft_worker: QObject | None = None
+
+        self.zzb_excel_edit = DropPathLineEdit(suffixes=(".xlsx", ".xlsm"))
+        self.zzb_media_edit = DropPathLineEdit(allow_dirs=True, suffixes=(".zip",))
+        self.zzb_title_edit = QLineEdit()
+        self.zzb_category_edit = QLineEdit()
+        self.zzb_product_code_edit = QLineEdit()
+        self.zzb_output_dir_edit = QLineEdit("imports")
+        self.zzb_sku_text_edit = QPlainTextEdit()
+        self.zzb_sku_text_edit.setPlaceholderText("粘贴至尊宝复制 SKU 文字")
+        self.zzb_sku_text_edit.setMaximumHeight(120)
+        self.import_zzb_button = QPushButton("导入并生成商品资料")
 
         self.product_path_edit = QLineEdit()
         self.profile_dir_edit = QLineEdit("profiles/chrome")
@@ -89,12 +192,15 @@ class MainWindow(QMainWindow):
         self.no_save_check = QCheckBox("只填表不保存")
 
         self.validate_button = QPushButton("校验资料")
+        self.add_to_batch_button = QPushButton("加入批次")
         self.open_login_button = QPushButton("打开后台登录")
         self.check_login_button = QPushButton("检查登录状态")
         self.close_login_button = QPushButton("关闭登录浏览器")
-        self.run_draft_button = QPushButton("运行草稿流程")
+        self.clear_batch_button = QPushButton("清空批次")
+        self.run_draft_button = QPushButton("运行当前草稿流程")
+        self.run_batch_button = QPushButton("批量创建草稿")
 
-        self.product_table = QTableWidget(0, 6)
+        self.product_table = QTableWidget(0, 7)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
 
@@ -105,6 +211,38 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         root = QVBoxLayout()
 
+        zzb_group = QGroupBox("至尊宝导入")
+        zzb_layout = QGridLayout()
+        zzb_layout.addWidget(QLabel("导出表格"), 0, 0)
+        zzb_layout.addWidget(self.zzb_excel_edit, 0, 1, 1, 3)
+        zzb_excel_button = QPushButton("选择")
+        zzb_excel_button.clicked.connect(self._browse_zzb_excel)
+        zzb_layout.addWidget(zzb_excel_button, 0, 4)
+        zzb_layout.addWidget(QLabel("媒体资源"), 1, 0)
+        zzb_layout.addWidget(self.zzb_media_edit, 1, 1, 1, 3)
+        zzb_zip_button = QPushButton("选择 zip")
+        zzb_zip_button.clicked.connect(self._browse_zzb_media_zip)
+        zzb_layout.addWidget(zzb_zip_button, 1, 4)
+        zzb_dir_button = QPushButton("选择文件夹")
+        zzb_dir_button.clicked.connect(self._browse_zzb_media_dir)
+        zzb_layout.addWidget(zzb_dir_button, 1, 5)
+        zzb_layout.addWidget(QLabel("商品标题"), 2, 0)
+        zzb_layout.addWidget(self.zzb_title_edit, 2, 1, 1, 5)
+        zzb_layout.addWidget(QLabel("类目路径"), 3, 0)
+        zzb_layout.addWidget(self.zzb_category_edit, 3, 1, 1, 5)
+        zzb_layout.addWidget(QLabel("SKU文字"), 4, 0)
+        zzb_layout.addWidget(self.zzb_sku_text_edit, 4, 1, 1, 5)
+        zzb_layout.addWidget(QLabel("商品编码"), 5, 0)
+        zzb_layout.addWidget(self.zzb_product_code_edit, 5, 1)
+        zzb_layout.addWidget(QLabel("输出目录"), 5, 2)
+        zzb_layout.addWidget(self.zzb_output_dir_edit, 5, 3)
+        zzb_output_button = QPushButton("选择")
+        zzb_output_button.clicked.connect(lambda: self._browse_directory(self.zzb_output_dir_edit))
+        zzb_layout.addWidget(zzb_output_button, 5, 4)
+        zzb_layout.addWidget(self.import_zzb_button, 5, 5)
+        zzb_group.setLayout(zzb_layout)
+        root.addWidget(zzb_group)
+
         file_row = QHBoxLayout()
         file_row.addWidget(QLabel("商品资料"))
         file_row.addWidget(self.product_path_edit, 1)
@@ -112,6 +250,7 @@ class MainWindow(QMainWindow):
         browse_file_button.clicked.connect(self._browse_product_file)
         file_row.addWidget(browse_file_button)
         file_row.addWidget(self.validate_button)
+        file_row.addWidget(self.add_to_batch_button)
         root.addLayout(file_row)
 
         config_group = QGroupBox("运行配置")
@@ -145,17 +284,20 @@ class MainWindow(QMainWindow):
         action_row.addWidget(self.check_login_button)
         action_row.addWidget(self.close_login_button)
         action_row.addStretch(1)
+        action_row.addWidget(self.clear_batch_button)
         action_row.addWidget(self.no_save_check)
         action_row.addWidget(self.run_draft_button)
+        action_row.addWidget(self.run_batch_button)
         root.addLayout(action_row)
 
-        self.product_table.setHorizontalHeaderLabels(["商品编号", "标题", "类目", "SKU", "图片", "状态"])
+        self.product_table.setHorizontalHeaderLabels(["商品编号", "标题", "类目", "SKU", "图片", "状态", "资料"])
         self.product_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.product_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.product_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.product_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.product_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.product_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        self.product_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
         root.addWidget(self.product_table, 2)
 
         root.addWidget(QLabel("日志"))
@@ -166,11 +308,15 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
     def _connect_signals(self) -> None:
+        self.import_zzb_button.clicked.connect(self._import_zzb_product)
         self.validate_button.clicked.connect(self._validate_products)
+        self.add_to_batch_button.clicked.connect(self._add_current_product_to_batch)
         self.open_login_button.clicked.connect(self._open_login_browser)
         self.check_login_button.clicked.connect(self._check_login_state)
         self.close_login_button.clicked.connect(self._close_login_browser)
+        self.clear_batch_button.clicked.connect(self._clear_batch)
         self.run_draft_button.clicked.connect(self._start_draft_spike)
+        self.run_batch_button.clicked.connect(self._start_batch_drafts)
 
     def _browse_product_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -182,10 +328,83 @@ class MainWindow(QMainWindow):
         if path:
             self.product_path_edit.setText(path)
 
+    def _browse_zzb_excel(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择至尊宝导出表格",
+            str(Path.cwd()),
+            "Excel files (*.xlsx *.xlsm);;All files (*)",
+        )
+        if path:
+            self.zzb_excel_edit.setText(path)
+
+    def _browse_zzb_media_zip(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择至尊宝媒体 zip",
+            str(Path.cwd()),
+            "Zip files (*.zip);;All files (*)",
+        )
+        if path:
+            self.zzb_media_edit.setText(path)
+
+    def _browse_zzb_media_dir(self) -> None:
+        directory = QFileDialog.getExistingDirectory(self, "选择至尊宝媒体目录", str(Path.cwd()))
+        if directory:
+            self.zzb_media_edit.setText(directory)
+
     def _browse_directory(self, target: QLineEdit) -> None:
         directory = QFileDialog.getExistingDirectory(self, "选择目录", target.text() or str(Path.cwd()))
         if directory:
             target.setText(directory)
+
+    def _import_zzb_product(self) -> None:
+        excel_path = Path(self.zzb_excel_edit.text().strip()).expanduser()
+        assets_path = Path(self.zzb_media_edit.text().strip()).expanduser()
+        sku_text = self.zzb_sku_text_edit.toPlainText()
+        title = self.zzb_title_edit.text().strip()
+        category = self.zzb_category_edit.text().strip()
+        if not str(excel_path) or str(excel_path) == ".":
+            QMessageBox.warning(self, "导入失败", "请选择至尊宝导出表格。")
+            return
+        if not str(assets_path) or str(assets_path) == ".":
+            QMessageBox.warning(self, "导入失败", "请选择至尊宝媒体 zip 或文件夹。")
+            return
+        if not sku_text.strip():
+            QMessageBox.warning(self, "导入失败", "请粘贴至尊宝 SKU 文字。")
+            return
+        if not title:
+            QMessageBox.warning(self, "导入失败", "请填写商品标题。")
+            return
+        if not category:
+            QMessageBox.warning(self, "导入失败", "请填写类目路径。")
+            return
+
+        output_dir = Path(self.zzb_output_dir_edit.text().strip() or "imports").expanduser()
+        output_path = suggest_zzb_output_path(output_dir, excel_path, assets_path)
+        try:
+            result = import_zzb_export(
+                ZzbImportRequest(
+                    excel_path=excel_path,
+                    sku_text=sku_text,
+                    assets_path=assets_path,
+                    title=title,
+                    category=category,
+                    product_code=self.zzb_product_code_edit.text().strip(),
+                    output_path=output_path,
+                )
+            )
+        except ZzbImportError as exc:
+            self._append_log(str(exc))
+            QMessageBox.warning(self, "导入失败", str(exc))
+            return
+
+        self.product_path_edit.setText(str(result.output_path.resolve()))
+        self._append_log(f"至尊宝导入完成：{result.output_path.resolve()}")
+        self._append_log(f"SKU：{len(result.product.skus)}，图片：{len(result.product.images)}")
+        for note in result.notes:
+            self._append_log(note)
+        self._add_product_file_to_batch(result.output_path)
 
     def _validate_products(self) -> ProductValidationResult | None:
         path = self._product_file_path()
@@ -194,7 +413,8 @@ class MainWindow(QMainWindow):
 
         result = validate_product_file(path)
         self._validation_result = result
-        self._render_products(result)
+        if not self._batch_items:
+            self._render_products(result)
 
         if result.load_error:
             self._append_log(result.load_error)
@@ -221,12 +441,89 @@ class MainWindow(QMainWindow):
                 str(len(product.skus)),
                 str(len(product.images)),
                 status,
+                str(result.path),
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if column in {3, 4, 5}:
                     item.setTextAlignment(Qt.AlignCenter)
                 self.product_table.setItem(row, column, item)
+
+    def _add_current_product_to_batch(self) -> None:
+        path = self._product_file_path()
+        if path is None:
+            return
+        self._add_product_file_to_batch(path)
+
+    def _add_product_file_to_batch(self, path: Path) -> bool:
+        result = validate_product_file(path)
+        self._validation_result = result
+        if result.load_error:
+            self._append_log(result.load_error)
+            QMessageBox.warning(self, "加入批次失败", result.load_error)
+            return False
+        if result.errors:
+            self._append_log("资料校验失败")
+            for error in result.errors:
+                self._append_log(f"- {error}")
+            QMessageBox.warning(self, "加入批次失败", "\n".join(result.errors[:8]))
+            return False
+        if len(result.products) != 1:
+            message = f"批次暂只接受单商品资料文件，当前文件包含 {len(result.products)} 个商品。"
+            self._append_log(message)
+            QMessageBox.warning(self, "加入批次失败", message)
+            return False
+
+        resolved_path = result.path.resolve()
+        for item in self._batch_items:
+            if item.path.resolve() == resolved_path:
+                self._append_log(f"商品已在批次中：{resolved_path}")
+                self.product_path_edit.setText(str(resolved_path))
+                self._render_batch()
+                return True
+
+        product = result.products[0]
+        self._batch_items.append(
+            BatchProductItem(
+                path=resolved_path,
+                product_id=product.product_id or str(len(self._batch_items) + 1),
+                title=product.title,
+                category=product.category,
+                sku_count=len(product.skus),
+                image_count=len(product.images),
+            )
+        )
+        self.product_path_edit.setText(str(resolved_path))
+        self._append_log(f"已加入批次：{product.title}")
+        self._render_batch()
+        return True
+
+    def _render_batch(self) -> None:
+        self.product_table.setRowCount(len(self._batch_items))
+        for row, item in enumerate(self._batch_items):
+            status = item.status if not item.message else f"{item.status}: {item.message}"
+            values = [
+                item.product_id,
+                item.title,
+                item.category,
+                str(item.sku_count),
+                str(item.image_count),
+                status,
+                str(item.path),
+            ]
+            for column, value in enumerate(values):
+                table_item = QTableWidgetItem(value)
+                if column in {3, 4, 5}:
+                    table_item.setTextAlignment(Qt.AlignCenter)
+                self.product_table.setItem(row, column, table_item)
+
+    def _clear_batch(self) -> None:
+        if self._draft_thread is not None:
+            self._append_log("任务运行中，不能清空批次")
+            return
+        self._batch_items.clear()
+        self.product_table.setRowCount(0)
+        self._append_log("批次已清空")
 
     def _open_login_browser(self) -> None:
         if self._browser_session is not None:
@@ -320,6 +617,63 @@ class MainWindow(QMainWindow):
         self._set_draft_running(True)
         self._draft_thread.start()
 
+    def _start_batch_drafts(self) -> None:
+        if self._draft_thread is not None:
+            self._append_log("草稿流程正在运行")
+            return
+        if self._browser_session is not None:
+            self._append_log("请先关闭登录浏览器，再运行批量草稿流程")
+            QMessageBox.warning(self, "浏览器已打开", "请先关闭登录浏览器，再运行批量草稿流程。")
+            return
+        if not self._batch_items:
+            self._append_log("批次为空")
+            QMessageBox.warning(self, "批次为空", "请先导入或加入商品资料。")
+            return
+
+        config = self._browser_config(self.publish_url_edit.text().strip())
+        if config is None:
+            return
+
+        runnable_items = [
+            (index, item)
+            for index, item in enumerate(self._batch_items)
+            if item.status in {"待处理", "失败", "保存未确认"}
+        ]
+        if not runnable_items:
+            self._append_log("批次中没有待处理商品")
+            QMessageBox.information(self, "无需运行", "批次中没有待处理商品。")
+            return
+
+        requests = tuple(
+            DraftSpikeRequest(
+                product_path=item.path,
+                no_save=self.no_save_check.isChecked(),
+            )
+            for _, item in runnable_items
+        )
+        self._draft_thread = QThread(self)
+        self._draft_worker = BatchDraftWorker(config, requests)
+        self._draft_worker.moveToThread(self._draft_thread)
+        self._draft_thread.started.connect(self._draft_worker.run)
+        self._draft_worker.log.connect(self._append_log)
+        self._draft_worker.item_started.connect(
+            lambda worker_index: self._handle_batch_item_started(runnable_items[worker_index][0])
+        )
+        self._draft_worker.item_succeeded.connect(
+            lambda worker_index, result: self._handle_batch_item_success(runnable_items[worker_index][0], result)
+        )
+        self._draft_worker.item_failed.connect(
+            lambda worker_index, exc: self._handle_batch_item_failure(runnable_items[worker_index][0], exc)
+        )
+        self._draft_worker.finished.connect(self._draft_thread.quit)
+        self._draft_worker.finished.connect(self._draft_worker.deleteLater)
+        self._draft_thread.finished.connect(self._draft_thread.deleteLater)
+        self._draft_thread.finished.connect(self._draft_finished)
+
+        self._set_draft_running(True)
+        self._append_log(f"开始批量创建草稿：{len(requests)} 个商品")
+        self._draft_thread.start()
+
     def _handle_draft_success(self, result: object) -> None:
         assert isinstance(result, DraftSpikeRunResult)
         self._append_log(f"草稿保存：{result.saved}")
@@ -350,6 +704,35 @@ class MainWindow(QMainWindow):
 
         self._append_log(f"草稿流程失败：{exc}")
         QMessageBox.warning(self, "草稿流程失败", str(exc))
+
+    def _handle_batch_item_started(self, batch_index: int) -> None:
+        item = self._batch_items[batch_index]
+        item.status = "运行中"
+        item.message = ""
+        self.product_path_edit.setText(str(item.path))
+        self._render_batch()
+
+    def _handle_batch_item_success(self, batch_index: int, result: object) -> None:
+        assert isinstance(result, DraftSpikeRunResult)
+        item = self._batch_items[batch_index]
+        if result.no_save:
+            item.status = "已填表"
+        elif result.saved:
+            item.status = "草稿已保存"
+        else:
+            item.status = "保存未确认"
+        item.message = ""
+        self._append_log(f"批次商品完成：{item.title}，状态：{item.status}")
+        self._append_log(f"截图：{result.screenshot_path.resolve()}")
+        self._render_batch()
+
+    def _handle_batch_item_failure(self, batch_index: int, exc: object) -> None:
+        item = self._batch_items[batch_index]
+        item.status = "失败"
+        item.message = str(exc).splitlines()[0]
+        self._render_batch()
+        self._append_log(f"批次商品失败：{item.title}")
+        self._handle_draft_failure(exc)
 
     def _draft_finished(self) -> None:
         self._draft_thread = None
@@ -397,7 +780,11 @@ class MainWindow(QMainWindow):
 
     def _set_draft_running(self, running: bool) -> None:
         self.run_draft_button.setEnabled(not running)
+        self.run_batch_button.setEnabled(not running)
         self.validate_button.setEnabled(not running)
+        self.add_to_batch_button.setEnabled(not running)
+        self.clear_batch_button.setEnabled(not running)
+        self.import_zzb_button.setEnabled(not running)
         self.no_save_check.setEnabled(not running)
 
     def _append_log(self, message: str) -> None:

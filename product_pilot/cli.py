@@ -36,6 +36,12 @@ from product_pilot.app import (
     validate_product_file,
 )
 from product_pilot.domain.product import ProductDraft
+from product_pilot.importers.zzb import (
+    ZzbImportError,
+    ZzbImportRequest,
+    import_zzb_export,
+    suggest_zzb_output_path,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,6 +50,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     validate_parser = subparsers.add_parser("validate", help="Validate a product draft JSON or XLSX file.")
     validate_parser.add_argument("path", type=Path, help="Path to a product draft JSON or XLSX file.")
+
+    import_zzb_parser = subparsers.add_parser(
+        "import-zzb",
+        help="Convert a Zhizunbao export into ProductPilot's standard product-input.xlsx format.",
+    )
+    import_zzb_parser.add_argument("--excel", type=Path, required=True, help="Zhizunbao exported XLSX file.")
+    import_zzb_parser.add_argument("--assets", type=Path, required=True, help="Zhizunbao media zip or extracted folder.")
+    import_zzb_parser.add_argument("--sku-text-file", type=Path, help="Text file containing copied Zhizunbao SKU text.")
+    import_zzb_parser.add_argument("--sku-text", help="Copied Zhizunbao SKU text.")
+    import_zzb_parser.add_argument("--title", required=True, help="Product title for the generated workbook.")
+    import_zzb_parser.add_argument("--category", required=True, help="Product category path for the generated workbook.")
+    import_zzb_parser.add_argument("--product-id", default="", help="Product id. Defaults to 商品ID parsed from media path.")
+    import_zzb_parser.add_argument("--product-code", default="", help="Product code. Defaults to product id.")
+    import_zzb_parser.add_argument(
+        "--output",
+        type=Path,
+        help="Generated ProductPilot XLSX path. Defaults to imports/<product-id>/product-input.xlsx.",
+    )
 
     browser_parser = subparsers.add_parser(
         "browser-check",
@@ -190,6 +214,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "validate":
         return validate_product(args.path)
+    if args.command == "import-zzb":
+        return import_zzb(args)
     if args.command == "browser-check":
         return browser_check(args)
     if args.command == "publish-page-check":
@@ -200,6 +226,45 @@ def main(argv: list[str] | None = None) -> int:
         return draft_spike(args)
 
     raise AssertionError(f"unsupported command: {args.command}")
+
+
+def import_zzb(args: argparse.Namespace) -> int:
+    sku_text = args.sku_text or ""
+    if args.sku_text_file is not None:
+        try:
+            sku_text = args.sku_text_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"failed to read SKU text file: {exc}", file=sys.stderr)
+            return 2
+    if not sku_text.strip():
+        print("--sku-text or --sku-text-file is required", file=sys.stderr)
+        return 2
+
+    output_path = args.output or suggest_zzb_output_path(Path("imports"), args.excel, args.assets)
+    try:
+        result = import_zzb_export(
+            ZzbImportRequest(
+                excel_path=args.excel,
+                sku_text=sku_text,
+                assets_path=args.assets,
+                title=args.title,
+                category=args.category,
+                product_id=args.product_id,
+                product_code=args.product_code,
+                output_path=output_path,
+            )
+        )
+    except ZzbImportError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    print(f"output: {result.output_path.resolve()}")
+    print(f"asset_root: {result.asset_root.resolve()}")
+    print(f"skus: {len(result.product.skus)}")
+    print(f"images: {len(result.product.images)}")
+    for note in result.notes:
+        print(f"note: {note}")
+    return 0
 
 
 def browser_check(args: argparse.Namespace) -> int:
