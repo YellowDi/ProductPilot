@@ -33,6 +33,9 @@ class ZzbImportRequest:
     output_path: Path
     product_id: str = ""
     product_code: str = ""
+    stock: int | None = None
+    group_price: Decimal | None = None
+    single_price: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,18 @@ def import_zzb_export(request: ZzbImportRequest) -> ZzbImportResult:
 
     product_id = request.product_id.strip() or _product_id_from_path(request.assets_path) or output_path.parent.name
     product_code = request.product_code.strip() or product_id
+    if request.stock is not None and request.stock < 0:
+        raise ZzbImportError("库存不能小于 0")
+    if request.group_price is not None and request.group_price <= 0:
+        raise ZzbImportError("拼单价必须大于 0")
+    if request.single_price is not None and request.single_price <= 0:
+        raise ZzbImportError("单买价必须大于 0")
+    if (
+        request.group_price is not None
+        and request.single_price is not None
+        and request.single_price <= request.group_price
+    ):
+        raise ZzbImportError("单买价必须大于拼单价")
     product = _build_product(
         rows=rows,
         sku_text_rows=sku_text_rows,
@@ -87,6 +102,9 @@ def import_zzb_export(request: ZzbImportRequest) -> ZzbImportResult:
         product_code=product_code,
         title=title,
         category=category,
+        stock=request.stock,
+        group_price=request.group_price,
+        single_price=request.single_price,
     )
     errors = product.validate()
     if errors:
@@ -227,6 +245,9 @@ def _build_product(
     product_code: str,
     title: str,
     category: str,
+    stock: int | None,
+    group_price: Decimal | None,
+    single_price: Decimal | None,
 ) -> ProductDraft:
     sku_excel_rows = [row for row in rows if row.source == "SKU"]
     stock_by_sku = _stock_by_sku(sku_excel_rows)
@@ -235,12 +256,17 @@ def _build_product(
     skus = []
     for row in sku_text_rows:
         key = (row.color, row.size)
+        sku_price = group_price if group_price is not None else row.price
+        sku_single_price = single_price if single_price is not None else sku_price + Decimal("1.00")
+        if sku_single_price <= sku_price:
+            raise ZzbImportError("单买价必须大于拼单价")
         skus.append(
             {
                 "name": f"{row.color} {row.size}",
                 "attributes": {"颜色分类": row.color, "鞋码": row.size},
-                "price": row.price,
-                "stock": stock_by_sku.get(key, 1000),
+                "price": sku_price,
+                "single_price": sku_single_price,
+                "stock": stock if stock is not None else stock_by_sku.get(key, 1000),
             }
         )
 

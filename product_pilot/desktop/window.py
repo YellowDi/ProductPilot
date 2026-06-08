@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from threading import Event
 
@@ -203,6 +204,12 @@ class MainWindow(QMainWindow):
         self.zzb_title_edit = QLineEdit()
         self.zzb_category_edit = QLineEdit()
         self.zzb_product_code_edit = QLineEdit()
+        self.zzb_stock_edit = QLineEdit()
+        self.zzb_stock_edit.setPlaceholderText("如 198")
+        self.zzb_group_price_edit = QLineEdit()
+        self.zzb_group_price_edit.setPlaceholderText("如 146.64")
+        self.zzb_single_price_edit = QLineEdit()
+        self.zzb_single_price_edit.setPlaceholderText("必须高于拼单价")
         self.zzb_output_dir_edit = QLineEdit("imports")
         self.zzb_sku_text_edit = QPlainTextEdit()
         self.zzb_sku_text_edit.setPlaceholderText("粘贴至尊宝复制 SKU 文字")
@@ -260,19 +267,25 @@ class MainWindow(QMainWindow):
         zzb_layout.addWidget(self.zzb_title_edit, 2, 1, 1, 5)
         zzb_layout.addWidget(QLabel("类目路径"), 3, 0)
         zzb_layout.addWidget(self.zzb_category_edit, 3, 1, 1, 5)
-        zzb_layout.addWidget(QLabel("SKU文字"), 4, 0)
-        zzb_layout.addWidget(self.zzb_sku_text_edit, 4, 1, 1, 5)
-        zzb_layout.addWidget(QLabel("商品编码"), 5, 0)
-        zzb_layout.addWidget(self.zzb_product_code_edit, 5, 1)
-        zzb_layout.addWidget(QLabel("输出目录"), 5, 2)
-        zzb_layout.addWidget(self.zzb_output_dir_edit, 5, 3)
+        zzb_layout.addWidget(QLabel("库存"), 4, 0)
+        zzb_layout.addWidget(self.zzb_stock_edit, 4, 1)
+        zzb_layout.addWidget(QLabel("拼单价"), 4, 2)
+        zzb_layout.addWidget(self.zzb_group_price_edit, 4, 3)
+        zzb_layout.addWidget(QLabel("单买价"), 4, 4)
+        zzb_layout.addWidget(self.zzb_single_price_edit, 4, 5)
+        zzb_layout.addWidget(QLabel("SKU文字"), 5, 0)
+        zzb_layout.addWidget(self.zzb_sku_text_edit, 5, 1, 1, 5)
+        zzb_layout.addWidget(QLabel("商品编码"), 6, 0)
+        zzb_layout.addWidget(self.zzb_product_code_edit, 6, 1)
+        zzb_layout.addWidget(QLabel("输出目录"), 6, 2)
+        zzb_layout.addWidget(self.zzb_output_dir_edit, 6, 3)
         zzb_output_button = QPushButton("选择")
         zzb_output_button.clicked.connect(lambda: self._browse_directory(self.zzb_output_dir_edit))
-        zzb_layout.addWidget(zzb_output_button, 5, 4)
+        zzb_layout.addWidget(zzb_output_button, 6, 4)
         zzb_button_row = QHBoxLayout()
         zzb_button_row.addWidget(self.clear_zzb_button)
         zzb_button_row.addWidget(self.import_zzb_button)
-        zzb_layout.addLayout(zzb_button_row, 5, 5)
+        zzb_layout.addLayout(zzb_button_row, 6, 5)
         zzb_group.setLayout(zzb_layout)
         root.addWidget(zzb_group)
 
@@ -397,6 +410,9 @@ class MainWindow(QMainWindow):
         self.zzb_media_edit.clear()
         self.zzb_title_edit.clear()
         self.zzb_product_code_edit.clear()
+        self.zzb_stock_edit.clear()
+        self.zzb_group_price_edit.clear()
+        self.zzb_single_price_edit.clear()
         self.zzb_sku_text_edit.clear()
         self._append_log("至尊宝导入信息已清空")
 
@@ -421,6 +437,10 @@ class MainWindow(QMainWindow):
         if not category:
             QMessageBox.warning(self, "导入失败", "请填写类目路径。")
             return
+        price_config = self._zzb_price_config()
+        if price_config is None:
+            return
+        stock, group_price, single_price = price_config
 
         output_dir = Path(self.zzb_output_dir_edit.text().strip() or "imports").expanduser()
         output_path = suggest_zzb_output_path(output_dir, excel_path, assets_path)
@@ -433,6 +453,9 @@ class MainWindow(QMainWindow):
                     title=title,
                     category=category,
                     product_code=self.zzb_product_code_edit.text().strip(),
+                    stock=stock,
+                    group_price=group_price,
+                    single_price=single_price,
                     output_path=output_path,
                 )
             )
@@ -447,6 +470,29 @@ class MainWindow(QMainWindow):
         for note in result.notes:
             self._append_log(note)
         self._add_product_file_to_batch(result.output_path)
+
+    def _zzb_price_config(self) -> tuple[int, Decimal, Decimal] | None:
+        try:
+            stock = int(self.zzb_stock_edit.text().strip())
+        except ValueError:
+            QMessageBox.warning(self, "导入失败", "库存必须是整数。")
+            return None
+        try:
+            group_price = Decimal(self.zzb_group_price_edit.text().strip())
+            single_price = Decimal(self.zzb_single_price_edit.text().strip())
+        except (InvalidOperation, ValueError):
+            QMessageBox.warning(self, "导入失败", "拼单价和单买价必须是有效数字。")
+            return None
+        if stock < 0:
+            QMessageBox.warning(self, "导入失败", "库存不能小于 0。")
+            return None
+        if group_price <= 0 or single_price <= 0:
+            QMessageBox.warning(self, "导入失败", "拼单价和单买价必须大于 0。")
+            return None
+        if single_price <= group_price:
+            QMessageBox.warning(self, "导入失败", "单买价必须大于拼单价。")
+            return None
+        return stock, group_price, single_price
 
     def _validate_products(self) -> ProductValidationResult | None:
         path = self._product_file_path()

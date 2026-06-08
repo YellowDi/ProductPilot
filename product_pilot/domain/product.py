@@ -75,6 +75,8 @@ class ProductSku:
             errors.append(f"sku.stock must be greater than or equal to 0: {self.name or '<empty>'}")
         if self.single_price is not None and self.single_price <= Decimal("0"):
             errors.append(f"sku.single_price must be greater than 0: {self.name or '<empty>'}")
+        if self.single_price is not None and self.single_price <= self.price:
+            errors.append(f"sku.single_price must be greater than sku.price: {self.name or '<empty>'}")
         if self.reference_price is not None and self.reference_price <= Decimal("0"):
             errors.append(f"sku.reference_price must be greater than 0: {self.name or '<empty>'}")
         if self.reference_price is not None:

@@ -71,6 +71,7 @@ class ZzbImportTests(unittest.TestCase):
             self.assertEqual(result.product.product_id, "123456")
             self.assertEqual(len(result.product.skus), 2)
             self.assertEqual([sku.stock for sku in result.product.skus], [198, 199])
+            self.assertEqual([str(sku.single_price) for sku in result.product.skus], ["147.64", "147.64"])
             self.assertEqual(
                 [(image.role, image.sku_attribute, image.sku_value) for image in result.product.images],
                 [
@@ -83,6 +84,33 @@ class ZzbImportTests(unittest.TestCase):
             product = load_products_from_xlsx(output_path)[0]
             self.assertEqual(product.validate(), [])
             self.assertEqual(validate_product_assets(product, output_path.parent), [])
+
+    def test_import_applies_stock_and_price_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            excel_path = root / "至尊宝_导出excel.xlsx"
+            _write_zzb_workbook(excel_path)
+            zip_path = root / "拼多多_商品ID_123456.zip"
+            _write_media_zip(zip_path)
+            output_path = root / "imports" / "123456" / "product-input.xlsx"
+
+            result = import_zzb_export(
+                ZzbImportRequest(
+                    excel_path=excel_path,
+                    sku_text="颜色分类:黑色 鞋码:38 皮鞋尺码 价格： 146.64",
+                    assets_path=zip_path,
+                    title="测试男鞋",
+                    category="流行男鞋 > 商务鞋 > 正装皮鞋",
+                    stock=66,
+                    group_price=Decimal("129.90"),
+                    single_price=Decimal("139.90"),
+                    output_path=output_path,
+                )
+            )
+
+            self.assertEqual(result.product.skus[0].stock, 66)
+            self.assertEqual(result.product.skus[0].price, Decimal("129.90"))
+            self.assertEqual(result.product.skus[0].single_price, Decimal("139.90"))
 
 
 def _write_zzb_workbook(path: Path) -> None:

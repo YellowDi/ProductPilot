@@ -166,9 +166,10 @@ def upload_extra_images(
             notes.append(f"uploaded extra main images: {len(main_images)}")
 
     if detail_images:
-        detail_target = first_upload_target(targets, "detail")
+        targets = scan_upload_targets(page)
+        detail_target = detail_upload_target(targets)
         if detail_target is None:
-            notes.append("detail image upload target not found")
+            raise ValueError("detail image upload target not found or unsafe; stopped to avoid uploading details into SKU")
         else:
             page.locator("input[type=file]").nth(detail_target.file_input_index).set_input_files(
                 [str(path) for path in detail_images]
@@ -242,7 +243,15 @@ def scan_upload_targets(page: Any) -> list[UploadTarget]:
             return Array.from(document.querySelectorAll("input[type=file]")).map((el, fileInputIndex) => {
                 const texts = ancestorTexts(el);
                 const rect = el.getBoundingClientRect();
-                const nearbyText = texts.find(text => text.length > 8) || texts[0] || "";
+                const nearbyText = texts.find(text => (
+                    text.includes("商品详情") ||
+                    text.includes("快捷编辑") ||
+                    text.includes("价格及库存") ||
+                    text.includes("批量设置") ||
+                    text.includes("商品轮播图") ||
+                    text.includes("主轮播图") ||
+                    text.includes("白底图")
+                )) || texts.find(text => text.length > 8) || texts[0] || "";
                 return {
                     file_input_index: fileInputIndex,
                     purpose: purposeOf(texts),
@@ -304,6 +313,29 @@ def first_upload_target(targets: list[UploadTarget], purpose: str) -> UploadTarg
         if target.purpose == purpose and not target.disabled:
             return target
     return None
+
+
+def detail_upload_target(targets: list[UploadTarget]) -> UploadTarget | None:
+    candidates = [
+        target
+        for target in targets
+        if (
+            target.purpose == "detail"
+            and not target.disabled
+            and "image" in target.accept
+            and _looks_like_detail_upload_target(target)
+        )
+    ]
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda target: (not target.visible, target.file_input_index))[0]
+
+
+def _looks_like_detail_upload_target(target: UploadTarget) -> bool:
+    text = target.nearby_text
+    if "价格及库存" in text or "拼单价" in text or "批量设置" in text:
+        return False
+    return any(marker in text for marker in ("商品详情", "快捷编辑", "已上传0/50", "详情图", "上传详情图"))
 
 
 def save_draft(page: Any) -> list[str]:
@@ -727,7 +759,7 @@ def _format_decimal(value: Decimal) -> str:
 
 
 def _draft_sku_from_product_sku(sku: ProductSku) -> DraftSkuData:
-    single_price = sku.single_price if sku.single_price is not None else sku.price
+    single_price = sku.single_price if sku.single_price is not None else sku.price + Decimal("1.00")
     option_values = tuple(sku.attributes.values()) if sku.attributes else (sku.name,)
     return DraftSkuData(
         size=sku.name,
@@ -740,7 +772,7 @@ def _draft_sku_from_product_sku(sku: ProductSku) -> DraftSkuData:
 
 
 def _reference_price_for_product_sku(sku: ProductSku) -> Decimal:
-    single_price = sku.single_price if sku.single_price is not None else sku.price
+    single_price = sku.single_price if sku.single_price is not None else sku.price + Decimal("1.00")
     return sku.reference_price if sku.reference_price is not None else single_price + Decimal("1.00")
 
 

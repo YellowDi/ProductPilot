@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +64,9 @@ def build_parser() -> argparse.ArgumentParser:
     import_zzb_parser.add_argument("--category", required=True, help="Product category path for the generated workbook.")
     import_zzb_parser.add_argument("--product-id", default="", help="Product id. Defaults to 商品ID parsed from media path.")
     import_zzb_parser.add_argument("--product-code", default="", help="Product code. Defaults to product id.")
+    import_zzb_parser.add_argument("--stock", type=int, help="Stock to write to every imported SKU.")
+    import_zzb_parser.add_argument("--group-price", help="Group price to write to every imported SKU.")
+    import_zzb_parser.add_argument("--single-price", help="Single-buy price to write to every imported SKU.")
     import_zzb_parser.add_argument(
         "--output",
         type=Path,
@@ -240,6 +244,13 @@ def import_zzb(args: argparse.Namespace) -> int:
         print("--sku-text or --sku-text-file is required", file=sys.stderr)
         return 2
 
+    try:
+        group_price = Decimal(str(args.group_price)) if args.group_price is not None else None
+        single_price = Decimal(str(args.single_price)) if args.single_price is not None else None
+    except (InvalidOperation, ValueError) as exc:
+        print(f"invalid price: {exc}", file=sys.stderr)
+        return 2
+
     output_path = args.output or suggest_zzb_output_path(Path("imports"), args.excel, args.assets)
     try:
         result = import_zzb_export(
@@ -251,6 +262,9 @@ def import_zzb(args: argparse.Namespace) -> int:
                 category=args.category,
                 product_id=args.product_id,
                 product_code=args.product_code,
+                stock=args.stock,
+                group_price=group_price,
+                single_price=single_price,
                 output_path=output_path,
             )
         )
