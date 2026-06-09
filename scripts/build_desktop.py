@@ -98,6 +98,7 @@ def packaged_app_path(dist_dir: Path) -> Path:
 
 def archive_app(app_path: Path, platform_name: str) -> Path:
     archive_path = RELEASE_ROOT / f"{APP_NAME}-{platform_name}.zip"
+    archive_root = archive_root_for_app(app_path)
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     if archive_path.exists():
         archive_path.unlink()
@@ -110,7 +111,7 @@ def archive_app(app_path: Path, platform_name: str) -> Path:
                 "-k",
                 "--sequesterRsrc",
                 "--keepParent",
-                str(app_path),
+                str(archive_root),
                 str(archive_path),
             ],
             check=True,
@@ -120,10 +121,16 @@ def archive_app(app_path: Path, platform_name: str) -> Path:
     shutil.make_archive(
         str(archive_path.with_suffix("")),
         "zip",
-        root_dir=app_path.parent,
-        base_dir=app_path.name,
+        root_dir=archive_root.parent,
+        base_dir=archive_root.name,
     )
     return archive_path
+
+
+def archive_root_for_app(app_path: Path) -> Path:
+    if platform.system() == "Darwin":
+        return app_path
+    return app_path.parent
 
 
 if __name__ == "__main__":
