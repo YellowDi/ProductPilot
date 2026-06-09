@@ -123,7 +123,10 @@ def _write_zzb_workbook(path: Path) -> None:
     sheet.append(["SKU", "SKU01_黑色_38 皮鞋尺码.jpg", "https://example.test/sku.jpg", "146.64", 198])
     sheet.append(["SKU", "SKU02_黑色_39 皮鞋尺码.jpg", "https://example.test/sku.jpg", "146.64", 199])
     sheet.append(["详情图", "详情图01.jpg", "https://example.test/detail.jpg", None, None])
-    workbook.save(path)
+    try:
+        workbook.save(path)
+    finally:
+        workbook.close()
 
 
 def _write_media_zip(path: Path) -> None:

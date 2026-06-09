@@ -203,36 +203,39 @@ def _read_zzb_excel_rows(path: Path) -> list[_ZzbExcelRow]:
     except Exception as exc:
         raise ZzbImportError(f"至尊宝表格无效：{exc}") from exc
 
-    sheet = workbook["全部"] if "全部" in workbook.sheetnames else workbook.active
-    header = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), None)
-    if header is None:
-        raise ZzbImportError("至尊宝表格为空")
-    indexes = {str(value or "").strip(): index for index, value in enumerate(header)}
-    required = ("来源", "名称")
-    missing = [name for name in required if name not in indexes]
-    if missing:
-        raise ZzbImportError(f"至尊宝表格缺少列：{', '.join(missing)}")
+    try:
+        sheet = workbook["全部"] if "全部" in workbook.sheetnames else workbook.active
+        header = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        if header is None:
+            raise ZzbImportError("至尊宝表格为空")
+        indexes = {str(value or "").strip(): index for index, value in enumerate(header)}
+        required = ("来源", "名称")
+        missing = [name for name in required if name not in indexes]
+        if missing:
+            raise ZzbImportError(f"至尊宝表格缺少列：{', '.join(missing)}")
 
-    rows: list[_ZzbExcelRow] = []
-    for values in sheet.iter_rows(min_row=2, values_only=True):
-        source = _cell_text(values, indexes["来源"])
-        name = _cell_text(values, indexes["名称"])
-        if not source and not name:
-            continue
-        if not source or not name:
-            raise ZzbImportError(f"至尊宝表格存在来源或名称为空的行：{values}")
-        rows.append(
-            _ZzbExcelRow(
-                source=source,
-                name=name,
-                price=_decimal(_cell_value(values, indexes.get("价格"))),
-                stock=_int(_cell_value(values, indexes.get("库存"))),
+        rows: list[_ZzbExcelRow] = []
+        for values in sheet.iter_rows(min_row=2, values_only=True):
+            source = _cell_text(values, indexes["来源"])
+            name = _cell_text(values, indexes["名称"])
+            if not source and not name:
+                continue
+            if not source or not name:
+                raise ZzbImportError(f"至尊宝表格存在来源或名称为空的行：{values}")
+            rows.append(
+                _ZzbExcelRow(
+                    source=source,
+                    name=name,
+                    price=_decimal(_cell_value(values, indexes.get("价格"))),
+                    stock=_int(_cell_value(values, indexes.get("库存"))),
+                )
             )
-        )
 
-    if not rows:
-        raise ZzbImportError("至尊宝表格没有有效数据行")
-    return rows
+        if not rows:
+            raise ZzbImportError("至尊宝表格没有有效数据行")
+        return rows
+    finally:
+        workbook.close()
 
 
 def _build_product(
@@ -372,7 +375,10 @@ def _write_standard_workbook(path: Path, product: ProductDraft) -> None:
     for image in product.images:
         images.append([product.product_id, image.role, str(image.path), image.sku_attribute, image.sku_value])
 
-    workbook.save(path)
+    try:
+        workbook.save(path)
+    finally:
+        workbook.close()
 
 
 def _ensure_declared_images_exist(images: list[dict[str, Any]], workbook_dir: Path) -> None:

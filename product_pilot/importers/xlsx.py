@@ -60,24 +60,27 @@ def load_products_from_xlsx(path: Path) -> list[ProductDraft]:
     except Exception as exc:
         raise ProductWorkbookError(f"invalid xlsx: {exc}") from exc
 
-    products_sheet = _get_sheet(workbook, "products")
-    skus_sheet = _get_sheet(workbook, "skus")
-    images_sheet = _get_sheet(workbook, "images")
+    try:
+        products_sheet = _get_sheet(workbook, "products")
+        skus_sheet = _get_sheet(workbook, "skus")
+        images_sheet = _get_sheet(workbook, "images")
 
-    products = _read_products(products_sheet)
-    skus_by_product_id = _read_skus(skus_sheet, products)
-    images_by_product_id = _read_images(images_sheet, set(products))
+        products = _read_products(products_sheet)
+        skus_by_product_id = _read_skus(skus_sheet, products)
+        images_by_product_id = _read_images(images_sheet, set(products))
 
-    return [
-        ProductDraft.from_mapping(
-            {
-                **payload,
-                "skus": skus_by_product_id.get(product_id, []),
-                "images": images_by_product_id.get(product_id, []),
-            }
-        )
-        for product_id, payload in products.items()
-    ]
+        return [
+            ProductDraft.from_mapping(
+                {
+                    **payload,
+                    "skus": skus_by_product_id.get(product_id, []),
+                    "images": images_by_product_id.get(product_id, []),
+                }
+            )
+            for product_id, payload in products.items()
+        ]
+    finally:
+        workbook.close()
 
 
 def _get_sheet(workbook: Any, key: str) -> Any:

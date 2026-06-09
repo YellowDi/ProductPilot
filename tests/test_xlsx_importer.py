@@ -113,7 +113,10 @@ def _write_product_workbook(path: Path) -> None:
     images.append(["SKU06", "detail", "detail-01.jpg"])
     images.append(["SKU06", "sku", "sku.jpg"])
 
-    workbook.save(path)
+    try:
+        workbook.save(path)
+    finally:
+        workbook.close()
 
 
 def _write_multi_sku_workbook(path: Path, *, default_stock: int | str = 20) -> None:
@@ -137,7 +140,10 @@ def _write_multi_sku_workbook(path: Path, *, default_stock: int | str = 20) -> N
     images.append(["", "sku", "sku-black.jpg", "颜色分类", "黑色"])
     images.append(["", "sku", "sku-brown.jpg", "颜色分类", "棕色"])
 
-    workbook.save(path)
+    try:
+        workbook.save(path)
+    finally:
+        workbook.close()
 
 
 if __name__ == "__main__":
