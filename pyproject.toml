@@ -15,6 +15,9 @@ automation = [
 desktop = [
   "PySide6",
 ]
+package = [
+  "pyinstaller",
+]
 ocr = [
   "paddleocr",
 ]

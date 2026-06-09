@@ -51,6 +51,10 @@ from product_pilot.importers.zzb import (
 )
 
 
+def _default_workspace_dir() -> Path:
+    return Path.home() / "ProductPilot"
+
+
 class DropPathLineEdit(QLineEdit):
     def __init__(
         self,
@@ -210,7 +214,8 @@ class MainWindow(QMainWindow):
         self.zzb_group_price_edit.setPlaceholderText("如 146.64")
         self.zzb_single_price_edit = QLineEdit()
         self.zzb_single_price_edit.setPlaceholderText("必须高于拼单价")
-        self.zzb_output_dir_edit = QLineEdit("imports")
+        workspace_dir = _default_workspace_dir()
+        self.zzb_output_dir_edit = QLineEdit(str(workspace_dir / "imports"))
         self.zzb_sku_text_edit = QPlainTextEdit()
         self.zzb_sku_text_edit.setPlaceholderText("粘贴至尊宝复制 SKU 文字")
         self.zzb_sku_text_edit.setMaximumHeight(120)
@@ -218,8 +223,8 @@ class MainWindow(QMainWindow):
         self.clear_zzb_button = QPushButton("清空导入信息")
 
         self.product_path_edit = QLineEdit()
-        self.profile_dir_edit = QLineEdit("profiles/chrome")
-        self.artifacts_dir_edit = QLineEdit("artifacts/browser")
+        self.profile_dir_edit = QLineEdit(str(workspace_dir / "profiles" / "chrome"))
+        self.artifacts_dir_edit = QLineEdit(str(workspace_dir / "artifacts" / "browser"))
         self.backend_url_edit = QLineEdit("https://mms.pinduoduo.com/")
         self.publish_url_edit = QLineEdit("https://mms.pinduoduo.com/goods/category")
         self.channel_edit = QLineEdit("chrome")
