@@ -1,0 +1,63 @@
+name: Package desktop
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+            artifact: ProductPilot-macos-arm64
+            archive: release/ProductPilot-darwin-arm64.zip
+          - name: macOS Intel
+            os: macos-15-intel
+            artifact: ProductPilot-macos-x64
+            archive: release/ProductPilot-darwin-x64.zip
+          - name: Windows
+            os: windows-latest
+            artifact: ProductPilot-windows-x64
+            archive: release/ProductPilot-windows-x64.zip
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[desktop,automation,package]"
+
+      - name: Validate source
+        run: |
+          python -m compileall product_pilot tests scripts
+          python -m unittest
+
+      - name: Build desktop package
+        run: python scripts/build_desktop.py
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 14

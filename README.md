@@ -175,6 +175,19 @@ Windows `.exe` builds must be produced on Windows. macOS builds can be created o
 macOS Gatekeeper or Windows SmartScreen warnings after downloading; production delivery should add signing and
 notarization.
 
+### GitHub Actions Packaging
+
+The same packaging script can run in GitHub Actions to produce macOS and Windows artifacts without maintaining a local
+Windows build machine.
+
+Run `.github/workflows/package-desktop.yml` manually from the GitHub Actions tab, or push a tag matching `v*`.
+
+The workflow uploads three artifacts:
+
+- `ProductPilot-macos-arm64`
+- `ProductPilot-macos-x64`
+- `ProductPilot-windows-x64`
+
 ## Quick Check
 
 ```bash
