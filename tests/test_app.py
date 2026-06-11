@@ -5,7 +5,25 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from product_pilot.app import load_single_product_file, validate_product_file
+from product_pilot.app import _page_has_manual_check, load_single_product_file, validate_product_file
+
+
+class FakeBodyLocator:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def inner_text(self, timeout: int = 0) -> str:
+        return self.text
+
+
+class FakeManualCheckPage:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def locator(self, selector: str) -> FakeBodyLocator:
+        if selector != "body":
+            raise AssertionError(f"unexpected selector: {selector}")
+        return FakeBodyLocator(self.text)
 
 
 class ProductAppValidationTests(unittest.TestCase):
@@ -59,6 +77,11 @@ class ProductAppValidationTests(unittest.TestCase):
 
         self.assertIsNone(product)
         self.assertEqual(error, "unsupported product file type: .txt")
+
+    def test_page_has_manual_check_detects_slider_prompt(self) -> None:
+        page = FakeManualCheckPage("请按住滑块，拖动到最右边完成安全验证")
+
+        self.assertTrue(_page_has_manual_check(page))
 
 
 if __name__ == "__main__":

@@ -114,7 +114,7 @@ def fill_minimal_draft_fields(
     notes: list[str] = []
 
     dismiss_known_tips(page)
-    click_optional_button(page, "一键复用", notes)
+    click_first_optional_button(page, ("一键填充", "一键复用"), notes, timeout_ms=8_000)
     dismiss_known_tips(page)
 
     page.get_by_placeholder("商品标题组成").fill(data.title)
@@ -398,7 +398,44 @@ def click_optional_button(page: Any, name: str, notes: list[str]) -> None:
         notes.append(f"optional button failed: {name}: {exc}")
     else:
         notes.append(f"clicked optional button: {name}")
-        page.wait_for_timeout(1_000)
+        page.wait_for_timeout(500)
+
+
+def click_first_optional_button(
+    page: Any,
+    names: tuple[str, ...],
+    notes: list[str],
+    *,
+    timeout_ms: int = 0,
+) -> None:
+    if timeout_ms > 0:
+        wait_for_visible_button_text(page, names, timeout_ms=timeout_ms)
+
+    for name in names:
+        button = page.get_by_role("button", name=name)
+        if button.count() == 0:
+            continue
+        click_optional_button(page, name, notes)
+        return
+    notes.append(f"optional button not found: {'/'.join(names)}")
+
+
+def wait_for_visible_button_text(page: Any, names: tuple[str, ...], *, timeout_ms: int) -> bool:
+    try:
+        page.wait_for_function(
+            """names => {
+                const compact = value => String(value || "").replace(/\\s+/g, " ").trim();
+                const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+                return Array.from(document.querySelectorAll("button")).some(button => (
+                    visible(button) && names.includes(compact(button.innerText || button.textContent))
+                ));
+            }""",
+            arg=list(names),
+            timeout=timeout_ms,
+        )
+    except Exception:
+        return False
+    return True
 
 
 def click_label_by_exact_text(page: Any, text: str) -> bool:

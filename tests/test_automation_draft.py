@@ -10,6 +10,7 @@ from product_pilot.automation.draft import (
     _format_decimal,
     classify_sku_upload_targets,
     color_sku_upload_targets,
+    click_first_optional_button,
     draft_data_from_product,
     images_from_product,
     main_image_from_product,
@@ -203,6 +204,48 @@ class DraftSpikeDataTests(unittest.TestCase):
         selected = color_sku_upload_targets(targets, expected_count=3)
 
         self.assertEqual([target.file_input_index for target in selected], [5, 9, 6])
+
+    def test_clicks_first_existing_optional_button(self) -> None:
+        class FakeButton:
+            def __init__(self, exists: bool) -> None:
+                self.exists = exists
+                self.clicked = False
+
+            def count(self) -> int:
+                return 1 if self.exists else 0
+
+            @property
+            def first(self) -> "FakeButton":
+                return self
+
+            def click(self, timeout: int) -> None:
+                self.clicked = True
+
+        class FakePage:
+            def __init__(self) -> None:
+                self.buttons = {
+                    "一键填充": FakeButton(False),
+                    "一键复用": FakeButton(True),
+                }
+                self.waited = False
+
+            def get_by_role(self, role: str, name: str) -> FakeButton:
+                return self.buttons[name]
+
+            def wait_for_timeout(self, timeout: int) -> None:
+                self.waited = True
+
+            def wait_for_function(self, expression: str, *, arg: object, timeout: int) -> None:
+                return None
+
+        page = FakePage()
+        notes: list[str] = []
+
+        click_first_optional_button(page, ("一键填充", "一键复用"), notes)
+
+        self.assertTrue(page.buttons["一键复用"].clicked)
+        self.assertTrue(page.waited)
+        self.assertEqual(notes, ["clicked optional button: 一键复用"])
 
 
 if __name__ == "__main__":

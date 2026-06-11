@@ -531,7 +531,12 @@ def _page_has_manual_check(page: object) -> bool:
         "安全验证",
         "人机验证",
         "请完成验证",
+        "请按住滑块",
         "拖动滑块",
+        "滑动滑块",
+        "验证中",
+        "环境异常",
+        "账号存在风险",
         "验证码",
     )
     return any(marker in text for marker in (*RISK_CHECK_MARKERS, *extra_markers))
