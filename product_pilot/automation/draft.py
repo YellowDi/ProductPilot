@@ -159,10 +159,15 @@ def upload_extra_images(
         if main_target is None:
             notes.append("main image upload target not found")
         else:
+            before_count = upload_preview_count(page, (main_target.file_input_index,))
             page.locator("input[type=file]").nth(main_target.file_input_index).set_input_files(
                 [str(path) for path in main_images]
             )
-            wait_for_uploads_to_settle(page)
+            wait_for_uploads_to_settle(
+                page,
+                target_indexes=(main_target.file_input_index,),
+                expected_preview_count=before_count + len(main_images),
+            )
             notes.append(f"uploaded extra main images: {len(main_images)}")
 
     if detail_images:
@@ -171,10 +176,15 @@ def upload_extra_images(
         if detail_target is None:
             raise ValueError("detail image upload target not found or unsafe; stopped to avoid uploading details into SKU")
         else:
+            before_count = upload_preview_count(page, (detail_target.file_input_index,))
             page.locator("input[type=file]").nth(detail_target.file_input_index).set_input_files(
                 [str(path) for path in detail_images]
             )
-            wait_for_uploads_to_settle(page)
+            wait_for_uploads_to_settle(
+                page,
+                target_indexes=(detail_target.file_input_index,),
+                expected_preview_count=before_count + len(detail_images),
+            )
             notes.append(f"uploaded detail images: {len(detail_images)}")
 
     if sku_images:
@@ -185,6 +195,8 @@ def upload_extra_images(
         else:
             uploaded_count = 0
             ordered_targets = sorted(sku_targets, key=lambda item: item.file_input_index)
+            attempted_target_indexes = tuple(target.file_input_index for target in ordered_targets[:len(sku_images)])
+            before_count = upload_preview_count(page, attempted_target_indexes)
             for target, sku_image in zip(ordered_targets, sku_images, strict=False):
                 try:
                     page.locator("input[type=file]").nth(target.file_input_index).set_input_files(
@@ -196,7 +208,11 @@ def upload_extra_images(
                 else:
                     uploaded_count += 1
                     page.wait_for_timeout(250)
-            wait_for_uploads_to_settle(page)
+            wait_for_uploads_to_settle(
+                page,
+                target_indexes=attempted_target_indexes,
+                expected_preview_count=before_count + uploaded_count,
+            )
             notes.append(f"uploaded sku images: {uploaded_count}/{len(sku_images)}")
             if len(sku_targets) != len(sku_images):
                 notes.append(f"sku image target count differs from image count: {len(sku_targets)}/{len(sku_images)}")
@@ -444,6 +460,8 @@ def fill_color_sku_options(
                 notes.append(f"color sku image upload target not found: {value}")
                 continue
             uploads.append((targets[index], value, image))
+        upload_target_indexes = tuple(target.file_input_index for target, _, _ in uploads)
+        before_count = upload_preview_count(page, upload_target_indexes)
         for target, value, image in sorted(uploads, key=lambda item: item[0].file_input_index, reverse=True):
             try:
                 page.locator("input[type=file]").nth(target.file_input_index).set_input_files(
@@ -455,7 +473,12 @@ def fill_color_sku_options(
             else:
                 uploaded_count += 1
                 page.wait_for_timeout(250)
-        wait_for_uploads_to_settle(page)
+        if upload_target_indexes:
+            wait_for_uploads_to_settle(
+                page,
+                target_indexes=upload_target_indexes,
+                expected_preview_count=before_count + uploaded_count,
+            )
 
     notes.append(f"processed color sku options: {created_count}/{len(values)}")
     if image_by_value:
@@ -484,46 +507,162 @@ def color_sku_upload_targets(targets: list[UploadTarget], *, expected_count: int
     return sorted(candidates, key=lambda target: (int(target.top // 20), target.left))[:expected_count]
 
 
-def wait_for_uploads_to_settle(page: Any, *, timeout_ms: int = 15_000) -> bool:
+def upload_preview_count(page: Any, target_indexes: tuple[int, ...]) -> int:
+    if not target_indexes:
+        return 0
+    try:
+        return int(page.evaluate(UPLOAD_PREVIEW_COUNT_SCRIPT, list(target_indexes)))
+    except Exception:
+        return 0
+
+
+def wait_for_uploads_to_settle(
+    page: Any,
+    *,
+    timeout_ms: int = 15_000,
+    target_indexes: tuple[int, ...] = (),
+    expected_preview_count: int | None = None,
+) -> bool:
     try:
         page.wait_for_timeout(500)
+        if target_indexes:
+            page.evaluate(UPLOAD_PREVIEW_COUNT_SCRIPT, list(target_indexes))
         page.wait_for_function(
-            """() => {
+            """payload => {
                 const compact = value => String(value || "").replace(/\\s+/g, " ").trim();
                 const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-                const bodyText = compact(document.body ? document.body.innerText : "");
-                const pendingMarkers = ["上传中", "正在上传", "上传图片中", "图片上传中"];
-                if (pendingMarkers.some(marker => bodyText.includes(marker))) {
-                    return false;
+                const uploadBusy = () => {
+                    const bodyText = compact(document.body ? document.body.innerText : "");
+                    const pendingMarkers = ["上传中", "正在上传", "上传图片中", "图片上传中"];
+                    if (pendingMarkers.some(marker => bodyText.includes(marker))) {
+                        return true;
+                    }
+                    const busySelectors = [
+                        "[aria-busy='true']",
+                        "[class*='progress']",
+                        "[class*='Progress']",
+                        "[class*='uploading']",
+                        "[class*='Uploading']",
+                        "[class*='spin']",
+                        "[class*='Spin']",
+                        "[class*='loading']",
+                        "[class*='Loading']"
+                    ];
+                    return Array.from(document.querySelectorAll(busySelectors.join(","))).some(el => {
+                        if (!visible(el)) return false;
+                        const text = compact(el.innerText || el.textContent || el.className || "");
+                        const context = compact(el.closest("[class*='upload'], [class*='Upload']")?.innerText || "");
+                        return (
+                            text.includes("上传") ||
+                            context.includes("上传") ||
+                            String(el.getAttribute("aria-label") || "").includes("上传")
+                        );
+                    });
+                };
+                const successNearTargets = () => {
+                    if (!payload.target_indexes.length) return false;
+                    const inputs = Array.from(document.querySelectorAll("input[type=file]"));
+                    return payload.target_indexes.some(index => {
+                        const input = inputs[index];
+                        if (!input) return false;
+                        let current = input.parentElement;
+                        for (let depth = 0; current && depth < 8; depth += 1) {
+                            const text = compact(current.innerText || current.textContent || "");
+                            if (
+                                text.includes("上传成功") ||
+                                text.includes("重新上传") ||
+                                text.includes("更换图片") ||
+                                /已上传(?!0\\/)/.test(text)
+                            ) {
+                                return true;
+                            }
+                            current = current.parentElement;
+                        }
+                        return false;
+                    });
+                };
+                const expected = payload.expected_preview_count;
+                if (expected !== null && payload.target_indexes.length) {
+                    const count = window.__productPilotUploadPreviewCount(payload.target_indexes);
+                    return (count >= expected || successNearTargets()) && !uploadBusy();
                 }
-                const busySelectors = [
-                    "[aria-busy='true']",
-                    "[class*='progress']",
-                    "[class*='Progress']",
-                    "[class*='uploading']",
-                    "[class*='Uploading']",
-                    "[class*='spin']",
-                    "[class*='Spin']",
-                    "[class*='loading']",
-                    "[class*='Loading']"
-                ];
-                return !Array.from(document.querySelectorAll(busySelectors.join(","))).some(el => {
-                    if (!visible(el)) return false;
-                    const text = compact(el.innerText || el.textContent || el.className || "");
-                    const context = compact(el.closest("[class*='upload'], [class*='Upload']")?.innerText || "");
-                    return (
-                        text.includes("上传") ||
-                        context.includes("上传") ||
-                        String(el.getAttribute("aria-label") || "").includes("上传")
-                    );
-                });
+                return (successNearTargets() || !payload.target_indexes.length) && !uploadBusy();
             }""",
+            arg={
+                "target_indexes": list(target_indexes),
+                "expected_preview_count": expected_preview_count,
+            },
             timeout=timeout_ms,
         )
     except Exception:
         return False
     page.wait_for_timeout(500)
     return True
+
+
+UPLOAD_PREVIEW_COUNT_SCRIPT = """
+targetIndexes => {
+    const compact = value => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    const meaningfulMedia = el => {
+        if (!visible(el)) return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 24 || rect.height < 24) return false;
+        if (el.tagName === "IMG") {
+            const src = String(el.currentSrc || el.src || "");
+            return !!src && !src.startsWith("data:image/svg");
+        }
+        if (el.tagName === "CANVAS" || el.tagName === "VIDEO") {
+            return true;
+        }
+        const background = String(getComputedStyle(el).backgroundImage || "");
+        return background.includes("url(") && !background.includes("data:image/svg");
+    };
+    const countInRoot = root => {
+        if (!root) return 0;
+        const candidates = new Set();
+        root.querySelectorAll("img, canvas, video, [style*='background-image']").forEach(el => {
+            if (meaningfulMedia(el)) candidates.add(el);
+        });
+        root.querySelectorAll("[class*='preview'], [class*='Preview'], [class*='image'], [class*='Image']").forEach(el => {
+            if (meaningfulMedia(el)) candidates.add(el);
+        });
+        return candidates.size;
+    };
+    const pickRoot = input => {
+        let current = input.parentElement;
+        let best = current;
+        for (let depth = 0; current && depth < 8; depth += 1) {
+            const text = compact(current.innerText || current.textContent || "");
+            const count = countInRoot(current);
+            if (
+                count > 0 ||
+                text.includes("本地上传") ||
+                text.includes("上传图片") ||
+                text.includes("重新上传") ||
+                text.includes("更换图片")
+            ) {
+                best = current;
+            }
+            if (
+                text.includes("价格及库存") ||
+                text.includes("商品详情") ||
+                text.includes("商品轮播图") ||
+                text.length > 900
+            ) {
+                break;
+            }
+            current = current.parentElement;
+        }
+        return best;
+    };
+    window.__productPilotUploadPreviewCount = indexes => {
+        const inputs = Array.from(document.querySelectorAll("input[type=file]"));
+        return indexes.reduce((total, index) => total + countInRoot(pickRoot(inputs[index])), 0);
+    };
+    return window.__productPilotUploadPreviewCount(targetIndexes);
+}
+"""
 
 
 def select_or_create_color_sku_option(page: Any, value: str) -> None:
