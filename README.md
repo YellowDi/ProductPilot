@@ -14,7 +14,7 @@ Implemented so far:
 - Persistent Chrome/Chromium profile launch configuration.
 - Merchant backend login-state detection.
 - Browser screenshot artifact output.
-- Minimal PySide6 desktop shell for product validation, login check, and single-product draft runs.
+- PySide6 desktop shell for product validation, login check, single-product draft runs, and multi-shop batch draft runs.
 
 ## Product Validation
 
@@ -52,7 +52,7 @@ python3 -B -m product_pilot.cli import-zzb \
 The command writes `imports/<商品ID>/product-input.xlsx`, which can then be validated or used by `draft-spike`.
 
 In the desktop app, each successful Zhizunbao import is added to the current batch table. Standard ProductPilot
-JSON/XLSX files can also be added to the batch manually. Use `批量创建草稿` to process pending batch items in order.
+JSON/XLSX files can also be added to the batch manually. Use `批量创建草稿` to process pending batch items.
 The app creates or updates drafts only; final publish/submit remains a manual merchant-backend action.
 
 ## Browser Login Check
@@ -138,7 +138,16 @@ Start the desktop shell:
 product-pilot-desktop
 ```
 
-The first desktop MVP supports selecting a product JSON/XLSX file, validating product data, opening the merchant backend for manual login checks, and running the single-product draft spike. Batch task queues, resume support, and OCR diagnostics are planned for later stages.
+The desktop app supports selecting a product JSON/XLSX file, validating product data, opening the merchant backend for manual login checks, running the single-product draft spike, and running the current batch across multiple shop profiles.
+
+For multi-shop batch runs, fill `店铺配置` with one shop per line:
+
+```text
+店铺A|profiles/shop-a
+店铺B|profiles/shop-b
+```
+
+Each shop runs in its own persistent Chrome profile. A shop browser stays open after its products are processed and returns to the merchant backend home page. Close those browsers from the app before starting another batch. Final publish/submit still remains manual.
 
 ## Desktop Packaging
 

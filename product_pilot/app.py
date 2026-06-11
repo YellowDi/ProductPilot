@@ -269,8 +269,6 @@ def run_draft_spike(
     manual_check_callback: WaitCallback | None = None,
     keep_open_callback: WaitCallback | None = None,
 ) -> DraftSpikeRunResult:
-    prepared = _prepare_draft_spike_request(request)
-
     try:
         session = PersistentBrowserSession(config).__enter__()
         try:
@@ -278,155 +276,175 @@ def run_draft_spike(
             if hold_callback is not None:
                 hold_callback("Complete manual login or risk checks in the opened browser, then press Enter...")
 
-            page_check = _wait_for_publish_page_ready(session, manual_check_callback)
-            if page_check.publish_page.state != PublishPageState.READY:
-                if keep_open_callback is not None:
-                    keep_open_callback("Press Enter to close the browser...")
-                raise DraftSpikePageNotReadyError(
-                    state=page_check.publish_page.state,
-                    reason=page_check.publish_page.reason,
-                    url=page_check.publish_page.snapshot.url,
-                    screenshot_path=page_check.screenshot_path,
-                )
-
-            notes: list[str] = []
-            _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "上传主图前")
-            _run_with_manual_check_retry(
-                "上传主图",
-                session.page,
-                manual_check_callback,
-                notes,
-                lambda: (
-                    session.page.locator("input[type=file]").first.set_input_files(str(prepared.main_image)),
-                    wait_for_uploads_to_settle(session.page),
-                ),
-            )
-            _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "上传主图后")
-
-            category_path = parse_category_path(prepared.category_value)
-            category_result = _run_with_manual_check_retry(
-                "选择类目",
-                session.page,
-                manual_check_callback,
-                notes,
-                lambda: select_category(session.page, category_path),
-            )
-            notes.extend(category_result.notes)
-            session.wait(2_000)
-            _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "选择类目后")
-
-            _run_with_manual_check_retry(
-                "进入商品信息页",
-                session.page,
-                manual_check_callback,
-                notes,
-                lambda: click_next_product_info(session.page, notes, timeout=10_000),
-            )
-            session.wait(8_000)
-            _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "进入商品信息页后")
-
-            notes.extend(
-                _run_with_manual_check_retry(
-                    "填写商品信息",
-                    session.page,
-                    manual_check_callback,
-                    notes,
-                    lambda: fill_minimal_draft_fields(
-                        session.page,
-                        prepared.data,
-                        sku_images=prepared.sku_images,
-                    ),
-                )
-            )
-            _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "填写商品信息后")
-            upload_notes, upload_targets = _run_with_manual_check_retry(
-                "上传附加图片",
-                session.page,
-                manual_check_callback,
-                notes,
-                lambda: upload_extra_images(
-                    session.page,
-                    main_images=prepared.extra_main_images,
-                    detail_images=prepared.detail_images,
-                    sku_images=tuple(
-                        image.path
-                        for image in prepared.sku_images
-                        if image.sku_attribute != "颜色分类"
-                    ),
-                ),
-            )
-            notes.extend(upload_notes)
-            _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "上传附加图片后")
-            if request.no_save:
-                notes.append("save skipped by --no-save")
-                saved = False
-            else:
-                _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "保存草稿前")
-                notes.extend(
-                    _run_with_manual_check_retry(
-                        "保存草稿",
-                        session.page,
-                        manual_check_callback,
-                        notes,
-                        lambda: save_draft(session.page),
-                    )
-                )
-                _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "保存草稿后")
-                saved = detect_draft_saved(session.page)
-
-            screenshot_path = session.take_screenshot("draft-spike")
-            output_path = screenshot_path.with_suffix(".json")
-            output_path.write_text(
-                json.dumps(
-                    {
-                        "url": session.page.url,
-                        "saved": saved,
-                        "no_save": request.no_save,
-                        "notes": notes,
-                        "upload_targets": [target.to_mapping() for target in upload_targets],
-                        "screenshot_path": str(screenshot_path),
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
+            result = run_draft_spike_in_session(
+                session,
+                request,
+                manual_check_callback=manual_check_callback,
             )
             if keep_open_callback is not None:
                 keep_open_callback("Press Enter to close the browser...")
-
-            return DraftSpikeRunResult(
-                url=session.page.url,
-                saved=saved,
-                no_save=request.no_save,
-                notes=tuple(notes),
-                upload_targets=tuple(upload_targets),
-                screenshot_path=screenshot_path,
-                output_path=output_path,
-            )
+            return result
         except ProductPilotAppError:
-            raise
-        except BrowserAutomationError:
-            raise
-        except Exception as exc:
-            screenshot_path: Path | None = None
-            try:
-                screenshot_path = session.take_screenshot("draft-spike-error")
-            except Exception:
-                screenshot_path = None
             if keep_open_callback is not None:
                 keep_open_callback(
                     "Automation stopped. If a verification is visible, handle it in the browser, "
                     "then press Enter to close the browser..."
                 )
-            raise ProductPilotAppError(
-                f"draft spike failed: {exc}",
-                exit_code=1,
-                screenshot_path=screenshot_path,
-            ) from exc
+            raise
+        except BrowserAutomationError:
+            raise
         finally:
             session.close()
     except BrowserAutomationError:
         raise
+
+
+def run_draft_spike_in_session(
+    session: PersistentBrowserSession,
+    request: DraftSpikeRequest,
+    *,
+    manual_check_callback: WaitCallback | None = None,
+) -> DraftSpikeRunResult:
+    prepared = _prepare_draft_spike_request(request)
+
+    try:
+        session.open_backend()
+        page_check = _wait_for_publish_page_ready(session, manual_check_callback)
+        if page_check.publish_page.state != PublishPageState.READY:
+            raise DraftSpikePageNotReadyError(
+                state=page_check.publish_page.state,
+                reason=page_check.publish_page.reason,
+                url=page_check.publish_page.snapshot.url,
+                screenshot_path=page_check.screenshot_path,
+            )
+
+        notes: list[str] = []
+        _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "上传主图前")
+        _run_with_manual_check_retry(
+            "上传主图",
+            session.page,
+            manual_check_callback,
+            notes,
+            lambda: (
+                session.page.locator("input[type=file]").first.set_input_files(str(prepared.main_image)),
+                wait_for_uploads_to_settle(session.page),
+            ),
+        )
+        _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "上传主图后")
+
+        category_path = parse_category_path(prepared.category_value)
+        category_result = _run_with_manual_check_retry(
+            "选择类目",
+            session.page,
+            manual_check_callback,
+            notes,
+            lambda: select_category(session.page, category_path),
+        )
+        notes.extend(category_result.notes)
+        session.wait(2_000)
+        _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "选择类目后")
+
+        _run_with_manual_check_retry(
+            "进入商品信息页",
+            session.page,
+            manual_check_callback,
+            notes,
+            lambda: click_next_product_info(session.page, notes, timeout=10_000),
+        )
+        session.wait(8_000)
+        _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "进入商品信息页后")
+
+        notes.extend(
+            _run_with_manual_check_retry(
+                "填写商品信息",
+                session.page,
+                manual_check_callback,
+                notes,
+                lambda: fill_minimal_draft_fields(
+                    session.page,
+                    prepared.data,
+                    sku_images=prepared.sku_images,
+                ),
+            )
+        )
+        _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "填写商品信息后")
+        upload_notes, upload_targets = _run_with_manual_check_retry(
+            "上传附加图片",
+            session.page,
+            manual_check_callback,
+            notes,
+            lambda: upload_extra_images(
+                session.page,
+                main_images=prepared.extra_main_images,
+                detail_images=prepared.detail_images,
+                sku_images=tuple(
+                    image.path
+                    for image in prepared.sku_images
+                    if image.sku_attribute != "颜色分类"
+                ),
+            ),
+        )
+        notes.extend(upload_notes)
+        _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "上传附加图片后")
+        if request.no_save:
+            notes.append("save skipped by --no-save")
+            saved = False
+        else:
+            _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "保存草稿前")
+            notes.extend(
+                _run_with_manual_check_retry(
+                    "保存草稿",
+                    session.page,
+                    manual_check_callback,
+                    notes,
+                    lambda: save_draft(session.page),
+                )
+            )
+            _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "保存草稿后")
+            saved = detect_draft_saved(session.page)
+
+        screenshot_path = session.take_screenshot("draft-spike")
+        output_path = screenshot_path.with_suffix(".json")
+        output_path.write_text(
+            json.dumps(
+                {
+                    "url": session.page.url,
+                    "saved": saved,
+                    "no_save": request.no_save,
+                    "notes": notes,
+                    "upload_targets": [target.to_mapping() for target in upload_targets],
+                    "screenshot_path": str(screenshot_path),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        return DraftSpikeRunResult(
+            url=session.page.url,
+            saved=saved,
+            no_save=request.no_save,
+            notes=tuple(notes),
+            upload_targets=tuple(upload_targets),
+            screenshot_path=screenshot_path,
+            output_path=output_path,
+        )
+    except ProductPilotAppError:
+        raise
+    except BrowserAutomationError:
+        raise
+    except Exception as exc:
+        screenshot_path: Path | None = None
+        try:
+            screenshot_path = session.take_screenshot("draft-spike-error")
+        except Exception:
+            screenshot_path = None
+        raise ProductPilotAppError(
+            f"draft spike failed: {exc}",
+            exit_code=1,
+            screenshot_path=screenshot_path,
+        ) from exc
 
 
 def _wait_for_publish_page_ready(
