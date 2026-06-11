@@ -88,6 +88,7 @@ class PersistentBrowserSession:
                 "slow_mo": self._config.slow_mo_ms,
                 "viewport": {"width": 1440, "height": 1000},
                 "accept_downloads": True,
+                "chromium_sandbox": True,
             }
             if self._config.channel and self._config.channel != "bundled":
                 launch_kwargs["channel"] = self._config.channel
