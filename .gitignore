@@ -9,5 +9,6 @@ build/
 release/
 artifacts/
 profiles/
+imports/
 /test/
 .DS_Store
