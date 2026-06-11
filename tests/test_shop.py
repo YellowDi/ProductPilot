@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from product_pilot.domain.shop import parse_shop_accounts
+from product_pilot.domain.shop import format_profile_dir, parse_shop_accounts
 
 
 class ShopAccountConfigTests(unittest.TestCase):
@@ -34,6 +34,9 @@ class ShopAccountConfigTests(unittest.TestCase):
         self.assertIn("line 2: expected format `店铺名|Profile目录`", errors)
         self.assertIn("line 4: duplicate shop name `店铺A`", errors)
         self.assertIn("line 5: duplicate profile dir `profiles/shop-a`", errors)
+
+    def test_formats_profile_dir_with_posix_separators(self) -> None:
+        self.assertEqual(format_profile_dir(Path("profiles") / "shop-a"), "profiles/shop-a")
 
 
 if __name__ == "__main__":

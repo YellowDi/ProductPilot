@@ -49,7 +49,7 @@ def parse_shop_accounts(text: str) -> tuple[list[ShopAccount], list[str]]:
             continue
         resolved_profile = account.profile_dir.resolve()
         if resolved_profile in seen_profiles:
-            errors.append(f"line {line_number}: duplicate profile dir `{account.profile_dir}`")
+            errors.append(f"line {line_number}: duplicate profile dir `{format_profile_dir(account.profile_dir)}`")
             continue
 
         seen_names.add(account.name)
@@ -57,3 +57,7 @@ def parse_shop_accounts(text: str) -> tuple[list[ShopAccount], list[str]]:
         accounts.append(account)
 
     return accounts, errors
+
+
+def format_profile_dir(path: Path) -> str:
+    return path.as_posix()
