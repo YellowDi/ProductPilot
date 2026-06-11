@@ -351,7 +351,7 @@ def run_draft_spike_in_session(
             notes,
             lambda: click_next_product_info(session.page, notes, timeout=10_000),
         )
-        session.wait(8_000)
+        session.wait(1_000)
         _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "进入商品信息页后")
 
         notes.extend(

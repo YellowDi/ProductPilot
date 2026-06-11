@@ -130,7 +130,7 @@ def fill_minimal_draft_fields(
             notes.extend(select_sku_option_values(page, group))
         processed_groups.append(format_sku_option_group(group))
     notes.append(f"processed sku options: {'; '.join(processed_groups)}")
-    page.wait_for_timeout(2_000)
+    page.wait_for_timeout(500)
 
     sku_fill_method = fill_sku_table(page, sorted_skus)
     fill_first_placeholder(page, "应大于商品最大单买价", _format_decimal(data.reference_price))
@@ -195,7 +195,7 @@ def upload_extra_images(
                     notes.append(f"sku image upload failed at input {target.file_input_index}: {exc}")
                 else:
                     uploaded_count += 1
-                    page.wait_for_timeout(700)
+                    page.wait_for_timeout(250)
             wait_for_uploads_to_settle(page)
             notes.append(f"uploaded sku images: {uploaded_count}/{len(sku_images)}")
             if len(sku_targets) != len(sku_images):
@@ -454,7 +454,7 @@ def fill_color_sku_options(
                 notes.append(f"color sku image upload failed: {value}: {exc}")
             else:
                 uploaded_count += 1
-                page.wait_for_timeout(700)
+                page.wait_for_timeout(250)
         wait_for_uploads_to_settle(page)
 
     notes.append(f"processed color sku options: {created_count}/{len(values)}")
@@ -484,14 +484,15 @@ def color_sku_upload_targets(targets: list[UploadTarget], *, expected_count: int
     return sorted(candidates, key=lambda target: (int(target.top // 20), target.left))[:expected_count]
 
 
-def wait_for_uploads_to_settle(page: Any, *, timeout_ms: int = 60_000) -> bool:
+def wait_for_uploads_to_settle(page: Any, *, timeout_ms: int = 15_000) -> bool:
     try:
+        page.wait_for_timeout(500)
         page.wait_for_function(
             """() => {
                 const compact = value => String(value || "").replace(/\\s+/g, " ").trim();
                 const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
                 const bodyText = compact(document.body ? document.body.innerText : "");
-                const pendingMarkers = ["上传中", "正在上传", "上传图片中", "图片上传中", "处理中"];
+                const pendingMarkers = ["上传中", "正在上传", "上传图片中", "图片上传中"];
                 if (pendingMarkers.some(marker => bodyText.includes(marker))) {
                     return false;
                 }
@@ -507,12 +508,13 @@ def wait_for_uploads_to_settle(page: Any, *, timeout_ms: int = 60_000) -> bool:
                     "[class*='Loading']"
                 ];
                 return !Array.from(document.querySelectorAll(busySelectors.join(","))).some(el => {
+                    if (!visible(el)) return false;
                     const text = compact(el.innerText || el.textContent || el.className || "");
-                    return visible(el) && (
+                    const context = compact(el.closest("[class*='upload'], [class*='Upload']")?.innerText || "");
+                    return (
                         text.includes("上传") ||
-                        text.includes("加载") ||
-                        text.includes("处理") ||
-                        String(el.getAttribute("aria-busy") || "") === "true"
+                        context.includes("上传") ||
+                        String(el.getAttribute("aria-label") || "").includes("上传")
                     );
                 });
             }""",
@@ -520,7 +522,7 @@ def wait_for_uploads_to_settle(page: Any, *, timeout_ms: int = 60_000) -> bool:
         )
     except Exception:
         return False
-    page.wait_for_timeout(3_000)
+    page.wait_for_timeout(500)
     return True
 
 
@@ -704,7 +706,7 @@ def fill_batch_sku_values(page: Any, sku: DraftSkuData) -> None:
     fill_first_placeholder(page, "单买价", _format_decimal(sku.single_price))
     page.wait_for_timeout(500)
     page.get_by_role("button", name="批量设置").click(timeout=8_000)
-    page.wait_for_timeout(1_500)
+    page.wait_for_timeout(500)
 
 
 def fill_first_placeholder(page: Any, placeholder: str, value: str) -> None:
