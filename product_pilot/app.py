@@ -368,6 +368,9 @@ def run_draft_spike_in_session(
             )
         )
         _pause_for_manual_check_if_present(session.page, manual_check_callback, notes, "填写商品信息后")
+        detail_images_for_upload: tuple[Path, ...] = ()
+        if prepared.detail_images:
+            notes.append("skipped detail images because Pinduoduo auto-fills product details from carousel images")
         upload_notes, upload_targets = _run_with_manual_check_retry(
             "上传附加图片",
             session.page,
@@ -376,7 +379,7 @@ def run_draft_spike_in_session(
             lambda: upload_extra_images(
                 session.page,
                 main_images=prepared.extra_main_images,
-                detail_images=prepared.detail_images,
+                detail_images=detail_images_for_upload,
                 sku_images=tuple(
                     image.path
                     for image in prepared.sku_images

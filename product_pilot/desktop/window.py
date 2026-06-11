@@ -708,7 +708,7 @@ class MainWindow(QMainWindow):
                 self.shop_table.setItem(row, column, item)
 
     def _clear_batch(self) -> None:
-        if self._draft_thread is not None or self._shop_threads:
+        if self._draft_thread is not None or self._shop_batch_running:
             self._append_log("任务运行中，不能清空批次")
             return
         self._batch_items.clear()
@@ -780,7 +780,7 @@ class MainWindow(QMainWindow):
         self._set_browser_open(False)
 
     def _start_draft_spike(self) -> None:
-        if self._draft_thread is not None or self._shop_threads:
+        if self._draft_thread is not None or self._shop_batch_running:
             self._append_log("草稿流程正在运行")
             return
         if self._browser_session is not None:
@@ -828,7 +828,7 @@ class MainWindow(QMainWindow):
         self._draft_thread.start()
 
     def _start_batch_drafts(self) -> None:
-        if self._draft_thread is not None or self._shop_threads:
+        if self._draft_thread is not None or self._shop_batch_running:
             self._append_log("草稿流程正在运行")
             return
         if self._browser_session is not None:
