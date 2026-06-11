@@ -50,7 +50,7 @@ from product_pilot.importers.zzb import (
     import_zzb_export,
     suggest_zzb_output_path,
 )
-from product_pilot.domain.shop import ShopAccount, parse_shop_accounts
+from product_pilot.domain.shop import ShopAccount
 
 
 def _default_workspace_dir() -> Path:
@@ -151,22 +151,26 @@ class ShopRunConfig:
     idle_url: str
 
 
-class ShopBatchWorker(QObject):
+class ShopBrowserWorker(QObject):
     log = Signal(str)
+    opened = Signal(str)
+    login_checked = Signal(str, object)
     manual_action_required = Signal(str, str)
     item_started = Signal(str, int)
     item_succeeded = Signal(str, int, object)
     item_failed = Signal(str, int, object)
     shop_failed = Signal(str, object)
-    work_finished = Signal(str)
+    batch_finished = Signal(str)
     finished = Signal(str)
 
-    def __init__(self, shop_config: ShopRunConfig, requests: tuple[DraftSpikeRequest, ...]) -> None:
+    def __init__(self, shop_config: ShopRunConfig) -> None:
         super().__init__()
         self._shop_config = shop_config
-        self._requests = requests
         self._manual_action_done = Event()
         self._close_requested = Event()
+        self._batch_requested = Event()
+        self._login_check_requested = Event()
+        self._requests: tuple[DraftSpikeRequest, ...] = ()
 
     @property
     def shop_name(self) -> str:
@@ -178,45 +182,35 @@ class ShopBatchWorker(QObject):
         shop_name = self.shop_name
         try:
             session = PersistentBrowserSession(self._shop_config.publish_config).__enter__()
-            self.log.emit(f"[{shop_name}] 浏览器已打开")
+            session.open_url(self._shop_config.idle_url)
+            self.opened.emit(shop_name)
+            self.log.emit(f"[{shop_name}] 浏览器已打开，可手动登录")
         except Exception as exc:
             self.shop_failed.emit(shop_name, exc)
             self.finished.emit(shop_name)
             return
 
         try:
-            should_wait_for_close = True
-            failed = False
-            for index, request in enumerate(self._requests):
-                self.item_started.emit(shop_name, index)
-                self.log.emit(f"[{shop_name}] 开始执行商品 {index + 1}/{len(self._requests)}")
-                try:
-                    result = run_draft_spike_in_session(
-                        session,
-                        request,
-                        manual_check_callback=self._wait_for_manual_action,
-                    )
-                except Exception as exc:
-                    self.item_failed.emit(shop_name, index, exc)
-                    failed = True
-                    break
-                self.item_succeeded.emit(shop_name, index, result)
-
-            if not failed:
-                try:
-                    session.open_url(self._shop_config.idle_url)
-                    self.log.emit(f"[{shop_name}] 已回到商家后台首页待命")
-                except Exception as exc:
-                    self.log.emit(f"[{shop_name}] 回到后台首页失败：{exc}")
-
-            self.work_finished.emit(shop_name)
-            self._close_requested.wait()
-            should_wait_for_close = False
+            while not self._close_requested.is_set():
+                if self._login_check_requested.wait(0.2):
+                    self._login_check_requested.clear()
+                    try:
+                        self.login_checked.emit(shop_name, session.check_login())
+                    except Exception as exc:
+                        self.shop_failed.emit(shop_name, exc)
+                if self._batch_requested.is_set():
+                    self._batch_requested.clear()
+                    self._run_batch(session)
         finally:
-            if should_wait_for_close:
-                self.work_finished.emit(shop_name)
             session.close()
             self.finished.emit(shop_name)
+
+    def request_login_check(self) -> None:
+        self._login_check_requested.set()
+
+    def start_batch(self, requests: tuple[DraftSpikeRequest, ...]) -> None:
+        self._requests = requests
+        self._batch_requested.set()
 
     def continue_after_manual_action(self) -> None:
         self._manual_action_done.set()
@@ -229,6 +223,35 @@ class ShopBatchWorker(QObject):
         self._manual_action_done.clear()
         self.manual_action_required.emit(self.shop_name, message)
         self._manual_action_done.wait()
+
+    def _run_batch(self, session: PersistentBrowserSession) -> None:
+        shop_name = self.shop_name
+        failed = False
+        for index, request in enumerate(self._requests):
+            if self._close_requested.is_set():
+                failed = True
+                break
+            self.item_started.emit(shop_name, index)
+            self.log.emit(f"[{shop_name}] 开始执行商品 {index + 1}/{len(self._requests)}")
+            try:
+                result = run_draft_spike_in_session(
+                    session,
+                    request,
+                    manual_check_callback=self._wait_for_manual_action,
+                )
+            except Exception as exc:
+                self.item_failed.emit(shop_name, index, exc)
+                failed = True
+                break
+            self.item_succeeded.emit(shop_name, index, result)
+
+        if not failed:
+            try:
+                session.open_url(self._shop_config.idle_url)
+                self.log.emit(f"[{shop_name}] 已回到商家后台首页待命")
+            except Exception as exc:
+                self.log.emit(f"[{shop_name}] 回到后台首页失败：{exc}")
+        self.batch_finished.emit(shop_name)
 
 
 @dataclass
@@ -256,10 +279,14 @@ class MainWindow(QMainWindow):
         self._browser_session: PersistentBrowserSession | None = None
         self._draft_thread: QThread | None = None
         self._draft_worker: QObject | None = None
+        self._shop_accounts: list[ShopAccount] = []
         self._shop_threads: list[QThread] = []
-        self._shop_workers: list[ShopBatchWorker] = []
+        self._shop_workers: list[ShopBrowserWorker] = []
         self._shop_work_finished: set[str] = set()
+        self._shop_statuses: dict[str, str] = {}
         self._closing_shop_browsers = False
+        self._shop_batch_running = False
+        self._current_runnable_indexes: tuple[int, ...] = ()
 
         self.zzb_excel_edit = DropPathLineEdit(suffixes=(".xlsx", ".xlsm"))
         self.zzb_media_edit = DropPathLineEdit(allow_dirs=True, suffixes=(".zip",))
@@ -285,9 +312,6 @@ class MainWindow(QMainWindow):
         self.artifacts_dir_edit = QLineEdit(str(workspace_dir / "artifacts" / "browser"))
         self.backend_url_edit = QLineEdit("https://mms.pinduoduo.com/")
         self.publish_url_edit = QLineEdit("https://mms.pinduoduo.com/goods/category")
-        self.shop_accounts_edit = QPlainTextEdit()
-        self.shop_accounts_edit.setPlaceholderText("每行一个店铺：店铺名|Profile目录。留空则使用上方 Profile。")
-        self.shop_accounts_edit.setMaximumHeight(80)
         self.channel_edit = QLineEdit("chrome")
         self.timeout_edit = QLineEdit("30000")
         self.slow_mo_edit = QLineEdit("0")
@@ -296,14 +320,14 @@ class MainWindow(QMainWindow):
 
         self.validate_button = QPushButton("校验资料")
         self.add_to_batch_button = QPushButton("加入批次")
-        self.open_login_button = QPushButton("打开后台登录")
-        self.check_login_button = QPushButton("检查登录状态")
-        self.close_login_button = QPushButton("关闭登录浏览器")
+        self.open_login_button = QPushButton("添加店铺浏览器")
+        self.check_login_button = QPushButton("检查全部登录")
+        self.close_login_button = QPushButton("关闭店铺浏览器")
         self.clear_batch_button = QPushButton("清空批次")
         self.run_draft_button = QPushButton("运行当前草稿流程")
         self.run_batch_button = QPushButton("批量创建草稿")
-        self.close_shop_browsers_button = QPushButton("关闭店铺浏览器")
 
+        self.shop_table = QTableWidget(0, 3)
         self.product_table = QTableWidget(0, 7)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
@@ -311,7 +335,6 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._connect_signals()
         self._set_browser_open(False)
-        self.close_shop_browsers_button.setEnabled(False)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout()
@@ -367,44 +390,28 @@ class MainWindow(QMainWindow):
         file_row.addWidget(self.add_to_batch_button)
         root.addLayout(file_row)
 
-        config_group = QGroupBox("运行配置")
-        config_layout = QGridLayout()
-        config_layout.addWidget(QLabel("后台 URL"), 0, 0)
-        config_layout.addWidget(self.backend_url_edit, 0, 1, 1, 3)
-        config_layout.addWidget(QLabel("发布 URL"), 1, 0)
-        config_layout.addWidget(self.publish_url_edit, 1, 1, 1, 3)
-        config_layout.addWidget(QLabel("Profile"), 2, 0)
-        config_layout.addWidget(self.profile_dir_edit, 2, 1)
-        profile_button = QPushButton("选择")
-        profile_button.clicked.connect(lambda: self._browse_directory(self.profile_dir_edit))
-        config_layout.addWidget(profile_button, 2, 2)
-        config_layout.addWidget(QLabel("Artifacts"), 3, 0)
-        config_layout.addWidget(self.artifacts_dir_edit, 3, 1)
-        artifacts_button = QPushButton("选择")
-        artifacts_button.clicked.connect(lambda: self._browse_directory(self.artifacts_dir_edit))
-        config_layout.addWidget(artifacts_button, 3, 2)
-        config_layout.addWidget(QLabel("Channel"), 2, 3)
-        config_layout.addWidget(self.channel_edit, 2, 4)
-        config_layout.addWidget(QLabel("Timeout ms"), 3, 3)
-        config_layout.addWidget(self.timeout_edit, 3, 4)
-        config_layout.addWidget(QLabel("Slow-mo ms"), 4, 3)
-        config_layout.addWidget(self.slow_mo_edit, 4, 4)
-        config_layout.addWidget(self.headless_check, 4, 1)
-        config_layout.addWidget(QLabel("店铺配置"), 5, 0)
-        config_layout.addWidget(self.shop_accounts_edit, 5, 1, 1, 4)
-        config_group.setLayout(config_layout)
-        root.addWidget(config_group)
+        account_group = QGroupBox("店铺账号")
+        account_layout = QVBoxLayout()
+        account_actions = QHBoxLayout()
+        account_actions.addWidget(self.open_login_button)
+        account_actions.addWidget(self.check_login_button)
+        account_actions.addWidget(self.close_login_button)
+        account_actions.addStretch(1)
+        account_layout.addLayout(account_actions)
+        self.shop_table.setHorizontalHeaderLabels(["店铺", "状态", "Profile"])
+        self.shop_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.shop_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.shop_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        account_layout.addWidget(self.shop_table)
+        account_group.setLayout(account_layout)
+        root.addWidget(account_group)
 
         action_row = QHBoxLayout()
-        action_row.addWidget(self.open_login_button)
-        action_row.addWidget(self.check_login_button)
-        action_row.addWidget(self.close_login_button)
-        action_row.addStretch(1)
         action_row.addWidget(self.clear_batch_button)
         action_row.addWidget(self.no_save_check)
+        action_row.addStretch(1)
         action_row.addWidget(self.run_draft_button)
         action_row.addWidget(self.run_batch_button)
-        action_row.addWidget(self.close_shop_browsers_button)
         root.addLayout(action_row)
 
         self.product_table.setHorizontalHeaderLabels(["商品编号", "标题", "类目", "SKU", "图片", "状态", "资料"])
@@ -435,7 +442,6 @@ class MainWindow(QMainWindow):
         self.clear_batch_button.clicked.connect(self._clear_batch)
         self.run_draft_button.clicked.connect(self._start_draft_spike)
         self.run_batch_button.clicked.connect(self._start_batch_drafts)
-        self.close_shop_browsers_button.clicked.connect(self._close_shop_browsers)
 
     def _browse_product_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -687,6 +693,20 @@ class MainWindow(QMainWindow):
             values.append(f"{shop_name}:{status}" if not message else f"{shop_name}:{status}({message})")
         return "；".join(values)
 
+    def _render_shop_accounts(self) -> None:
+        self.shop_table.setRowCount(len(self._shop_accounts))
+        for row, account in enumerate(self._shop_accounts):
+            values = [
+                account.name,
+                self._shop_statuses.get(account.name, "待登录"),
+                str(account.profile_dir),
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column == 1:
+                    item.setTextAlignment(Qt.AlignCenter)
+                self.shop_table.setItem(row, column, item)
+
     def _clear_batch(self) -> None:
         if self._draft_thread is not None or self._shop_threads:
             self._append_log("任务运行中，不能清空批次")
@@ -696,50 +716,67 @@ class MainWindow(QMainWindow):
         self._append_log("批次已清空")
 
     def _open_login_browser(self) -> None:
-        if self._shop_threads:
-            self._append_log("店铺浏览器已打开，不能再打开登录浏览器")
-            return
-        if self._browser_session is not None:
-            self._append_log("登录浏览器已打开")
+        if self._shop_batch_running:
+            self._append_log("批量任务运行中，不能添加店铺浏览器")
             return
 
-        config = self._browser_config(self.backend_url_edit.text().strip())
-        if config is None:
+        account = self._next_shop_account()
+        shop_config = self._shop_run_config(account)
+        if shop_config is None:
             return
 
-        try:
-            self._browser_session = PersistentBrowserSession(config).__enter__()
-            self._browser_session.open_backend()
-        except BrowserAutomationError as exc:
-            self._close_login_browser()
-            self._append_log(str(exc))
-            QMessageBox.warning(self, "浏览器启动失败", str(exc))
-            return
+        thread = QThread(self)
+        worker = ShopBrowserWorker(shop_config)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.opened.connect(self._handle_shop_browser_opened)
+        worker.login_checked.connect(self._handle_shop_login_checked)
+        worker.log.connect(self._append_log)
+        worker.manual_action_required.connect(self._handle_shop_manual_action_required)
+        worker.item_started.connect(self._handle_shop_worker_item_started)
+        worker.item_succeeded.connect(self._handle_shop_worker_item_success)
+        worker.item_failed.connect(self._handle_shop_worker_item_failure)
+        worker.shop_failed.connect(self._handle_shop_failure)
+        worker.batch_finished.connect(self._handle_shop_work_finished)
+        worker.finished.connect(lambda _shop_name, thread=thread: thread.quit())
+        worker.finished.connect(lambda _shop_name, worker=worker: worker.deleteLater())
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda thread=thread, worker=worker: self._handle_shop_thread_finished(thread, worker))
 
+        self._shop_accounts.append(account)
+        self._shop_threads.append(thread)
+        self._shop_workers.append(worker)
+        self._shop_statuses[account.name] = "启动中"
+        self._render_shop_accounts()
         self._set_browser_open(True)
-        self._append_log("后台浏览器已打开，可在 Chrome 中完成登录或风控验证")
+        thread.start()
+
+    def _next_shop_account(self) -> ShopAccount:
+        number = len(self._shop_accounts) + 1
+        name = f"店铺{number}"
+        profile_dir = _default_workspace_dir() / "profiles" / f"shop-{number:02d}"
+        return ShopAccount(name=name, profile_dir=profile_dir)
 
     def _check_login_state(self) -> None:
-        if self._browser_session is None:
-            self._append_log("请先打开后台登录浏览器")
+        if not self._shop_workers:
+            self._append_log("请先添加店铺浏览器")
             return
-
-        try:
-            result = self._browser_session.check_login()
-        except BrowserAutomationError as exc:
-            self._append_log(str(exc))
-            QMessageBox.warning(self, "登录检查失败", str(exc))
-            return
-
-        self._append_log(f"登录状态：{result.login.state.value}")
-        self._append_log(f"原因：{result.login.reason}")
-        self._append_log(f"页面：{result.login.snapshot.url}")
-        self._append_log(f"截图：{result.screenshot_path.resolve()}")
+        for worker in self._shop_workers:
+            worker.request_login_check()
+        self._append_log("已请求检查全部店铺登录状态")
 
     def _close_login_browser(self) -> None:
-        if self._browser_session is not None:
-            self._browser_session.close()
-            self._browser_session = None
+        if not self._shop_workers:
+            self._append_log("没有待关闭的店铺浏览器")
+            return
+        if self._shop_batch_running:
+            self._append_log("批量任务运行中，暂不能关闭店铺浏览器")
+            return
+        self._closing_shop_browsers = True
+        for worker in tuple(self._shop_workers):
+            self._shop_statuses[worker.shop_name] = "关闭中"
+            worker.close_session()
+        self._render_shop_accounts()
         self._set_browser_open(False)
 
     def _start_draft_spike(self) -> None:
@@ -802,8 +839,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "批次为空", "请先导入或加入商品资料。")
             return
 
-        shop_configs = self._shop_run_configs()
-        if not shop_configs:
+        if not self._shop_workers:
+            QMessageBox.warning(self, "缺少店铺", "请先点击“添加店铺浏览器”，完成对应账号登录后再运行批次。")
             return
 
         runnable_items = [
@@ -816,7 +853,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "无需运行", "批次中没有待处理商品。")
             return
 
-        shop_names = [shop_config.account.name for shop_config in shop_configs]
+        shop_names = [worker.shop_name for worker in self._shop_workers]
         for _, item in runnable_items:
             item.shop_statuses = {shop_name: "待处理" for shop_name in shop_names}
             item.shop_messages = {}
@@ -832,51 +869,16 @@ class MainWindow(QMainWindow):
             for _, item in runnable_items
         )
 
+        self._shop_batch_running = True
         self._set_draft_running(True)
-        self.close_shop_browsers_button.setEnabled(False)
         self._closing_shop_browsers = False
         self._shop_work_finished.clear()
-        self._append_log(f"开始多店铺批量创建草稿：{len(shop_configs)} 个店铺，{len(requests)} 个商品")
-
-        runnable_indexes = tuple(index for index, _ in runnable_items)
-        for shop_config in shop_configs:
-            thread = QThread(self)
-            worker = ShopBatchWorker(shop_config, requests)
-            worker.moveToThread(thread)
-            thread.started.connect(worker.run)
-            worker.log.connect(self._append_log)
-            worker.manual_action_required.connect(self._handle_shop_manual_action_required)
-            worker.item_started.connect(
-                lambda shop_name, worker_index, indexes=runnable_indexes: self._handle_shop_item_started(
-                    shop_name,
-                    indexes[worker_index],
-                )
-            )
-            worker.item_succeeded.connect(
-                lambda shop_name, worker_index, result, indexes=runnable_indexes: self._handle_shop_item_success(
-                    shop_name,
-                    indexes[worker_index],
-                    result,
-                )
-            )
-            worker.item_failed.connect(
-                lambda shop_name, worker_index, exc, indexes=runnable_indexes: self._handle_shop_item_failure(
-                    shop_name,
-                    indexes[worker_index],
-                    exc,
-                )
-            )
-            worker.shop_failed.connect(self._handle_shop_failure)
-            worker.work_finished.connect(self._handle_shop_work_finished)
-            worker.finished.connect(lambda _shop_name, thread=thread: thread.quit())
-            worker.finished.connect(lambda _shop_name, worker=worker: worker.deleteLater())
-            thread.finished.connect(thread.deleteLater)
-            thread.finished.connect(
-                lambda thread=thread, worker=worker: self._handle_shop_thread_finished(thread, worker)
-            )
-            self._shop_threads.append(thread)
-            self._shop_workers.append(worker)
-            thread.start()
+        self._current_runnable_indexes = tuple(index for index, _ in runnable_items)
+        self._append_log(f"开始多店铺批量创建草稿：{len(self._shop_workers)} 个店铺，{len(requests)} 个商品")
+        for worker in self._shop_workers:
+            self._shop_statuses[worker.shop_name] = "运行中"
+            worker.start_batch(requests)
+        self._render_shop_accounts()
 
     def _handle_draft_success(self, result: object) -> None:
         assert isinstance(result, DraftSpikeRunResult)
@@ -932,6 +934,35 @@ class MainWindow(QMainWindow):
                 worker.continue_after_manual_action()
                 return
 
+    def _handle_shop_browser_opened(self, shop_name: str) -> None:
+        self._shop_statuses[shop_name] = "待登录"
+        self._render_shop_accounts()
+        self._set_browser_open(True)
+
+    def _handle_shop_login_checked(self, shop_name: str, result: object) -> None:
+        state = result.login.state.value
+        self._shop_statuses[shop_name] = state
+        self._render_shop_accounts()
+        self._append_log(f"[{shop_name}] 登录状态：{state}")
+        self._append_log(f"[{shop_name}] 原因：{result.login.reason}")
+        self._append_log(f"[{shop_name}] 页面：{result.login.snapshot.url}")
+        self._append_log(f"[{shop_name}] 截图：{result.screenshot_path.resolve()}")
+
+    def _handle_shop_worker_item_started(self, shop_name: str, worker_index: int) -> None:
+        if worker_index >= len(self._current_runnable_indexes):
+            return
+        self._handle_shop_item_started(shop_name, self._current_runnable_indexes[worker_index])
+
+    def _handle_shop_worker_item_success(self, shop_name: str, worker_index: int, result: object) -> None:
+        if worker_index >= len(self._current_runnable_indexes):
+            return
+        self._handle_shop_item_success(shop_name, self._current_runnable_indexes[worker_index], result)
+
+    def _handle_shop_worker_item_failure(self, shop_name: str, worker_index: int, exc: object) -> None:
+        if worker_index >= len(self._current_runnable_indexes):
+            return
+        self._handle_shop_item_failure(shop_name, self._current_runnable_indexes[worker_index], exc)
+
     def _handle_shop_item_started(self, shop_name: str, batch_index: int) -> None:
         item = self._batch_items[batch_index]
         item.shop_statuses[shop_name] = "运行中"
@@ -957,25 +988,33 @@ class MainWindow(QMainWindow):
         item = self._batch_items[batch_index]
         item.shop_statuses[shop_name] = "失败"
         item.shop_messages[shop_name] = str(exc).splitlines()[0]
+        self._shop_statuses[shop_name] = "失败"
+        self._render_shop_accounts()
         self._render_batch()
         self._append_log(f"[{shop_name}] 商品失败：{item.title}")
         self._handle_draft_failure(exc)
 
     def _handle_shop_failure(self, shop_name: str, exc: object) -> None:
         self._shop_work_finished.add(shop_name)
+        self._shop_statuses[shop_name] = "失败"
         for item in self._batch_items:
             if item.shop_statuses.get(shop_name) in {"待处理", "运行中"}:
                 item.shop_statuses[shop_name] = "失败"
                 item.shop_messages[shop_name] = str(exc).splitlines()[0]
+        self._render_shop_accounts()
         self._render_batch()
         self._append_log(f"[{shop_name}] 店铺任务失败：{exc}")
         self._handle_draft_failure(exc)
+        self._maybe_enable_close_shop_browsers()
 
     def _handle_shop_work_finished(self, shop_name: str) -> None:
         self._shop_work_finished.add(shop_name)
+        if self._shop_statuses.get(shop_name) != "失败":
+            self._shop_statuses[shop_name] = "待命"
         for item in self._batch_items:
             if item.shop_statuses.get(shop_name) in {"待处理", "运行中"}:
                 item.shop_statuses[shop_name] = "未执行"
+        self._render_shop_accounts()
         self._render_batch()
         self._append_log(f"[{shop_name}] 商品任务结束，浏览器保持打开")
         self._maybe_enable_close_shop_browsers()
@@ -985,34 +1024,28 @@ class MainWindow(QMainWindow):
             self._shop_workers
             and len(self._shop_work_finished) >= len(self._shop_workers)
             and not self._closing_shop_browsers
-            and not self.close_shop_browsers_button.isEnabled()
         ):
-            self.close_shop_browsers_button.setEnabled(True)
+            self._shop_batch_running = False
+            self._set_draft_running(False)
             self._append_log("所有店铺商品任务已结束。浏览器已保持打开，关闭前不能启动下一批次。")
 
-    def _close_shop_browsers(self) -> None:
-        if not self._shop_workers:
-            self._append_log("没有待关闭的店铺浏览器")
-            return
-        self._closing_shop_browsers = True
-        self.close_shop_browsers_button.setEnabled(False)
-        self._append_log("正在关闭店铺浏览器")
-        for worker in tuple(self._shop_workers):
-            worker.close_session()
-
-    def _handle_shop_thread_finished(self, thread: QThread, worker: ShopBatchWorker) -> None:
+    def _handle_shop_thread_finished(self, thread: QThread, worker: ShopBrowserWorker) -> None:
         if thread in self._shop_threads:
             self._shop_threads.remove(thread)
         if worker in self._shop_workers:
             self._shop_workers.remove(worker)
+        self._shop_accounts = [account for account in self._shop_accounts if account.name != worker.shop_name]
+        self._shop_statuses.pop(worker.shop_name, None)
+        self._render_shop_accounts()
         if not self._shop_threads:
             self._shop_work_finished.clear()
             self._closing_shop_browsers = False
+            self._shop_batch_running = False
             self._set_draft_running(False)
-            self.close_shop_browsers_button.setEnabled(False)
             self._append_log("店铺浏览器已关闭")
         else:
             self._maybe_enable_close_shop_browsers()
+        self._set_browser_open(bool(self._shop_workers))
 
     def _draft_finished(self) -> None:
         self._draft_thread = None
@@ -1020,63 +1053,40 @@ class MainWindow(QMainWindow):
         self._set_draft_running(False)
         self._append_log("草稿流程结束")
 
-    def _shop_run_configs(self) -> list[ShopRunConfig]:
+    def _shop_run_config(self, account: ShopAccount) -> ShopRunConfig | None:
         publish_url = self.publish_url_edit.text().strip()
         idle_url = self.backend_url_edit.text().strip()
         if not publish_url or not idle_url:
             QMessageBox.warning(self, "配置错误", "后台 URL 和发布 URL 不能为空。")
-            return []
+            return None
         if not idle_url.startswith(("http://", "https://")):
             QMessageBox.warning(self, "配置错误", "后台 URL 必须是 http 或 https URL。")
-            return []
-
-        accounts, errors = parse_shop_accounts(self.shop_accounts_edit.toPlainText())
-        if errors:
-            QMessageBox.warning(self, "店铺配置错误", "\n".join(errors[:8]))
-            return []
-        if not accounts:
-            accounts = [
-                ShopAccount(
-                    name="默认店铺",
-                    profile_dir=Path(self.profile_dir_edit.text()).expanduser(),
-                )
-            ]
+            return None
 
         try:
             timeout_ms = int(self.timeout_edit.text())
             slow_mo_ms = int(self.slow_mo_edit.text())
         except ValueError:
             QMessageBox.warning(self, "配置错误", "Timeout 和 Slow-mo 必须是整数。")
-            return []
+            return None
 
         artifacts_base = Path(self.artifacts_dir_edit.text()).expanduser()
-        shop_configs: list[ShopRunConfig] = []
-        config_errors: list[str] = []
-        for account in accounts:
-            account_errors = account.validate()
-            if account_errors:
-                config_errors.extend(f"{account.name}: {error}" for error in account_errors)
-                continue
-
-            config = BrowserLaunchConfig(
-                backend_url=publish_url,
-                user_data_dir=account.profile_dir,
-                artifacts_dir=artifacts_base / _safe_path_part(account.name),
-                channel=self.channel_edit.text().strip(),
-                headless=self.headless_check.isChecked(),
-                timeout_ms=timeout_ms,
-                slow_mo_ms=slow_mo_ms,
-            )
-            errors = config.validate()
-            if errors:
-                config_errors.extend(f"{account.name}: {error}" for error in errors)
-                continue
-            shop_configs.append(ShopRunConfig(account=account, publish_config=config, idle_url=idle_url))
+        config_errors = account.validate()
+        config = BrowserLaunchConfig(
+            backend_url=publish_url,
+            user_data_dir=account.profile_dir,
+            artifacts_dir=artifacts_base / _safe_path_part(account.name),
+            channel=self.channel_edit.text().strip(),
+            headless=self.headless_check.isChecked(),
+            timeout_ms=timeout_ms,
+            slow_mo_ms=slow_mo_ms,
+        )
+        config_errors.extend(config.validate())
 
         if config_errors:
-            QMessageBox.warning(self, "店铺配置错误", "\n".join(config_errors[:8]))
-            return []
-        return shop_configs
+            QMessageBox.warning(self, "店铺配置错误", "\n".join(config_errors))
+            return None
+        return ShopRunConfig(account=account, publish_config=config, idle_url=idle_url)
 
     def _browser_config(self, url: str) -> BrowserLaunchConfig | None:
         if not url:
@@ -1112,9 +1122,11 @@ class MainWindow(QMainWindow):
         return Path(value).expanduser()
 
     def _set_browser_open(self, opened: bool) -> None:
-        self.open_login_button.setEnabled(not opened)
-        self.check_login_button.setEnabled(opened)
-        self.close_login_button.setEnabled(opened)
+        has_shops = bool(self._shop_workers)
+        editable = not self._shop_batch_running and not self._closing_shop_browsers
+        self.open_login_button.setEnabled(editable)
+        self.check_login_button.setEnabled(has_shops and editable)
+        self.close_login_button.setEnabled(has_shops and editable)
 
     def _set_draft_running(self, running: bool) -> None:
         self.run_draft_button.setEnabled(not running)
@@ -1125,7 +1137,7 @@ class MainWindow(QMainWindow):
         self.import_zzb_button.setEnabled(not running)
         self.clear_zzb_button.setEnabled(not running)
         self.no_save_check.setEnabled(not running)
-        self.shop_accounts_edit.setEnabled(not running)
+        self._set_browser_open(bool(self._shop_workers))
 
     def _append_log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")

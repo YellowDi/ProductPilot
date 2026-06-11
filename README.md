@@ -140,14 +140,12 @@ product-pilot-desktop
 
 The desktop app supports selecting a product JSON/XLSX file, validating product data, opening the merchant backend for manual login checks, running the single-product draft spike, and running the current batch across multiple shop profiles.
 
-For multi-shop batch runs, fill `店铺配置` with one shop per line:
+For multi-shop batch runs, click `添加店铺浏览器` once per shop account. Each click opens a new persistent
+Chrome profile such as `~/ProductPilot/profiles/shop-01`, `shop-02`, and so on. Complete login, QR scan,
+SMS verification, or risk checks manually in each browser window, then run `批量创建草稿`.
 
-```text
-店铺A|profiles/shop-a
-店铺B|profiles/shop-b
-```
-
-Each shop runs in its own persistent Chrome profile. A shop browser stays open after its products are processed and returns to the merchant backend home page. Close those browsers from the app before starting another batch. Final publish/submit still remains manual.
+Each shop browser stays open after its products are processed and returns to the merchant backend home page. Close
+those browsers from the app when they are no longer needed. Final publish/submit still remains manual.
 
 ## Desktop Packaging
 
