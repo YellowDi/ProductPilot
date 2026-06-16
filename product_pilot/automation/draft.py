@@ -18,6 +18,7 @@ class DraftSkuData:
     single_price: Decimal = Decimal("39.90")
     option_values: tuple[str, ...] = ()
     attribute_values: tuple[tuple[str, str], ...] = ()
+    sku_code: str = ""
 
 
 @dataclass(frozen=True)
@@ -84,7 +85,7 @@ class UploadTarget:
 
 
 def draft_data_from_product(product: ProductDraft) -> DraftSpikeData:
-    skus = tuple(_draft_sku_from_product_sku(sku) for sku in product.skus)
+    skus = tuple(_draft_sku_from_product_sku(sku, product.product_code) for sku in product.skus)
     reference_price = max(_reference_price_for_product_sku(sku) for sku in product.skus)
     return DraftSpikeData(
         title=product.title,
@@ -133,6 +134,7 @@ def fill_minimal_draft_fields(
     page.wait_for_timeout(500)
 
     sku_fill_method = fill_sku_table(page, sorted_skus)
+    sku_code_count = fill_sku_codes(page, sorted_skus)
     fill_first_placeholder(page, "应大于商品最大单买价", _format_decimal(data.reference_price))
     if data.product_code:
         if fill_product_code(page, data.product_code):
@@ -140,6 +142,8 @@ def fill_minimal_draft_fields(
         else:
             notes.append("product code input not found")
     notes.append(f"filled sku stock and prices via {sku_fill_method}")
+    if sku_code_count:
+        notes.append(f"filled sku codes: {sku_code_count}")
 
     return notes
 
@@ -836,6 +840,277 @@ def fill_product_code(page: Any, product_code: str) -> bool:
     return True
 
 
+def fill_sku_codes(page: Any, skus: tuple[DraftSkuData, ...]) -> int:
+    targets = _sku_code_fill_targets(skus)
+    if not targets:
+        return 0
+
+    remaining = {target["label"]: target for target in targets}
+    filled_count = 0
+    for _ in range(80):
+        result = page.evaluate(_SKU_CODE_FILL_VISIBLE_SCRIPT, list(remaining.values()))
+        errors = [str(error) for error in result.get("errors", [])]
+        if errors:
+            raise ValueError("; ".join(errors))
+
+        for label in result.get("filled_labels", []):
+            if label in remaining:
+                del remaining[str(label)]
+                filled_count += 1
+        if not remaining:
+            return filled_count
+
+        scrolled = page.evaluate(_SKU_CODE_SCROLL_SCRIPT)
+        if not scrolled:
+            break
+        page.wait_for_timeout(200)
+
+    missing = "; ".join(f"sku code row not found: {target['label']}" for target in remaining.values())
+    raise ValueError(missing)
+
+
+_SKU_CODE_FILL_VISIBLE_SCRIPT = """
+        targets => {
+            const compact = value => String(value || "").replace(/\\s+/g, " ").trim();
+            const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+            const escapeRegExp = value => String(value).replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&");
+            const containsValue = (text, value) => {
+                const normalized = compact(text);
+                const target = compact(value);
+                if (!target || !normalized.includes(target)) return false;
+                if (/^\\d+(?:\\.\\d+)?$/.test(target)) {
+                    return new RegExp(`(^|[^0-9.])${escapeRegExp(target)}([^0-9.]|$)`).test(normalized);
+                }
+                return true;
+            };
+            const editable = el => {
+                const type = String(el.type || "").toLowerCase();
+                return visible(el) &&
+                    !el.disabled &&
+                    type !== "file" &&
+                    type !== "hidden" &&
+                    type !== "checkbox" &&
+                    type !== "radio";
+            };
+            const textOf = el => compact(el.innerText || el.textContent || "");
+            const setValue = (el, value) => {
+                const descriptor = Object.getOwnPropertyDescriptor(el.constructor.prototype, "value");
+                if (descriptor && descriptor.set) {
+                    descriptor.set.call(el, value);
+                } else {
+                    el.value = value;
+                }
+                el.dispatchEvent(new Event("input", { bubbles: true }));
+                el.dispatchEvent(new Event("change", { bubbles: true }));
+            };
+            const scopeForHeader = header => {
+                let current = header.parentElement;
+                let fallback = null;
+                for (let depth = 0; current && depth < 14; depth += 1) {
+                    const text = textOf(current);
+                    if (
+                        text.includes("规格编码") &&
+                        text.includes("拼单价") &&
+                        text.includes("库存") &&
+                        current.querySelectorAll("input, textarea").length > 0
+                    ) {
+                        fallback = current;
+                        if (current.matches("table, [role=table], [class*=table], [class*=Table]")) {
+                            return current;
+                        }
+                    }
+                    current = current.parentElement;
+                }
+                return fallback;
+            };
+            const headerCandidates = Array.from(document.querySelectorAll("th, td, [role=columnheader], div, span"))
+                .filter(el => {
+                    const text = textOf(el).replace(/[＊*:：]/g, "");
+                    return visible(el) && text === "规格编码";
+                })
+                .map(header => ({ header, scope: scopeForHeader(header) }))
+                .filter(item => item.scope !== null);
+            if (!headerCandidates.length) {
+                return { filled_labels: [], errors: ["sku code table header not found"] };
+            }
+            headerCandidates.sort((left, right) => {
+                const leftInputs = left.scope.querySelectorAll("input, textarea").length;
+                const rightInputs = right.scope.querySelectorAll("input, textarea").length;
+                return rightInputs - leftInputs;
+            });
+            const header = headerCandidates[0].header;
+            const scope = headerCandidates[0].scope;
+            const headerRect = header.getBoundingClientRect();
+            const headerCenterX = headerRect.left + headerRect.width / 2;
+            const inSkuCodeColumn = el => {
+                const rect = el.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) return false;
+                const centerX = rect.left + rect.width / 2;
+                const tolerance = Math.max(headerRect.width / 2 + 12, 42);
+                return Math.abs(centerX - headerCenterX) <= tolerance;
+            };
+            const columnDistance = el => {
+                const rect = el.getBoundingClientRect();
+                return Math.abs(rect.left + rect.width / 2 - headerCenterX);
+            };
+            const rowForInput = input => {
+                const selectors = ["tr", "[role=row]", "[class*=Row]", "[class*=row]"];
+                for (const selector of selectors) {
+                    const row = input.closest(selector);
+                    if (row && textOf(row).length <= 1000) return row;
+                }
+                let current = input.parentElement;
+                for (let depth = 0; current && depth < 8; depth += 1) {
+                    const text = textOf(current);
+                    if (text.length <= 1000) {
+                        return current;
+                    }
+                    current = current.parentElement;
+                }
+                return null;
+            };
+            const documentOrder = (left, right) => {
+                if (left === right) return 0;
+                return left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_PRECEDING ? 1 : -1;
+            };
+            const inputs = Array.from(scope.querySelectorAll("input, textarea"))
+                .filter(el => editable(el) && inSkuCodeColumn(el));
+            if (!inputs.length) {
+                return { filled_labels: [], errors: ["sku code column inputs not found"] };
+            }
+            const knownColors = [...new Set(targets.map(target => target.color))];
+            const rowMatches = inputs
+                .map(input => ({ input, row: rowForInput(input) }))
+                .filter(match => match.row !== null)
+                .sort((left, right) => documentOrder(left.row, right.row));
+            const annotatedRows = [];
+            let activeColor = "";
+            for (const match of rowMatches) {
+                const text = textOf(match.row);
+                const colors = knownColors.filter(color => containsValue(text, color));
+                if (colors.length === 1) {
+                    activeColor = colors[0];
+                } else if (colors.length > 1) {
+                    activeColor = "";
+                }
+                annotatedRows.push({
+                    input: match.input,
+                    row: match.row,
+                    text,
+                    distance: columnDistance(match.input),
+                    color: colors.length === 1 ? colors[0] : activeColor,
+                });
+            }
+            const errors = [];
+            const filledLabels = [];
+            for (const target of targets) {
+                const matches = annotatedRows.filter(row => (
+                    row.color === target.color &&
+                    containsValue(row.text, target.size)
+                ));
+                if (matches.length === 0) continue;
+                const uniqueRows = new Set(matches.map(match => match.row));
+                if (uniqueRows.size > 1) {
+                    errors.push(`sku code row matched multiple rows: ${target.label}`);
+                    continue;
+                }
+                matches.sort((left, right) => left.distance - right.distance);
+                setValue(matches[0].input, target.sku_code);
+                filledLabels.push(target.label);
+            }
+            return { filled_labels: filledLabels, errors };
+        }
+"""
+
+
+_SKU_CODE_SCROLL_SCRIPT = """
+        () => {
+            const compact = value => String(value || "").replace(/\\s+/g, " ").trim();
+            const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+            const textOf = el => compact(el.innerText || el.textContent || "");
+            const header = Array.from(document.querySelectorAll("th, td, [role=columnheader], div, span"))
+                .find(el => visible(el) && textOf(el).replace(/[＊*:：]/g, "") === "规格编码");
+            if (!header) return false;
+
+            const candidates = [];
+            let current = header.parentElement;
+            for (let depth = 0; current && depth < 14; depth += 1) {
+                candidates.push(current);
+                current = current.parentElement;
+            }
+            const scope = candidates.find(el => {
+                const text = textOf(el);
+                return text.includes("规格编码") &&
+                    text.includes("拼单价") &&
+                    text.includes("库存") &&
+                    el.querySelectorAll("input, textarea").length > 0;
+            });
+            if (scope) {
+                candidates.push(...Array.from(scope.querySelectorAll("div, section, main, table, tbody")));
+            }
+            candidates.push(...Array.from(document.querySelectorAll("div, section, main, table, tbody")));
+
+            const headerRect = header.getBoundingClientRect();
+            const uniqueCandidates = [...new Set(candidates)];
+            const scrollables = uniqueCandidates
+                .filter(el => visible(el) && el.scrollHeight > el.clientHeight + 20)
+                .filter(el => el.scrollTop < el.scrollHeight - el.clientHeight - 5)
+                .map(el => {
+                    const rect = el.getBoundingClientRect();
+                    const containsHeader = el.contains(header);
+                    const inputCount = el.querySelectorAll("input, textarea").length;
+                    const verticalDistance = Math.abs(rect.top - headerRect.bottom);
+                    const area = Math.max(1, rect.width * rect.height);
+                    return { el, containsHeader, inputCount, verticalDistance, area };
+                })
+                .filter(item => item.inputCount > 0 || item.containsHeader)
+                .sort((left, right) => {
+                    if (left.containsHeader !== right.containsHeader) return left.containsHeader ? -1 : 1;
+                    if (left.inputCount !== right.inputCount) return right.inputCount - left.inputCount;
+                    if (left.verticalDistance !== right.verticalDistance) {
+                        return left.verticalDistance - right.verticalDistance;
+                    }
+                    return left.area - right.area;
+                });
+            for (const item of scrollables.slice(0, 4)) {
+                const scroller = item.el;
+                const before = scroller.scrollTop;
+                scroller.scrollTop = Math.min(
+                    before + Math.max(240, Math.floor(scroller.clientHeight * 0.8)),
+                    scroller.scrollHeight - scroller.clientHeight
+                );
+                scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+                if (scroller.scrollTop > before) {
+                    return true;
+                }
+            }
+
+            const before = window.scrollY;
+            window.scrollBy(0, Math.max(240, Math.floor(window.innerHeight * 0.8)));
+            return window.scrollY > before;
+        }
+"""
+
+
+def _sku_code_fill_targets(skus: tuple[DraftSkuData, ...]) -> list[dict[str, str]]:
+    targets: list[dict[str, str]] = []
+    for sku in skus:
+        if not sku.sku_code:
+            continue
+        color, size = _sku_code_match_values(sku.attribute_values)
+        if not color or not size:
+            raise ValueError(f"sku code requires color and size attributes: {sku.size or sku.sku_code}")
+        targets.append(
+            {
+                "sku_code": sku.sku_code,
+                "color": color,
+                "size": size,
+                "label": sku.size or f"{color}{size}",
+            }
+        )
+    return targets
+
+
 def fill_sku_table(page: Any, skus: tuple[DraftSkuData, ...]) -> str:
     batch_sku = uniform_batch_sku(skus)
     if batch_sku is not None:
@@ -936,22 +1211,39 @@ def _format_decimal(value: Decimal) -> str:
     return f"{value:.2f}"
 
 
-def _draft_sku_from_product_sku(sku: ProductSku) -> DraftSkuData:
+def _draft_sku_from_product_sku(sku: ProductSku, product_code: str = "") -> DraftSkuData:
     single_price = sku.single_price if sku.single_price is not None else sku.price + Decimal("1.00")
     option_values = tuple(sku.attributes.values()) if sku.attributes else (sku.name,)
+    attribute_values = tuple(sku.attributes.items())
     return DraftSkuData(
         size=sku.name,
         stock=sku.stock,
         group_price=sku.price,
         single_price=single_price,
         option_values=option_values,
-        attribute_values=tuple(sku.attributes.items()),
+        attribute_values=attribute_values,
+        sku_code=_sku_code_from_attributes(product_code, attribute_values),
     )
 
 
 def _reference_price_for_product_sku(sku: ProductSku) -> Decimal:
     single_price = sku.single_price if sku.single_price is not None else sku.price + Decimal("1.00")
     return sku.reference_price if sku.reference_price is not None else single_price + Decimal("1.00")
+
+
+def _sku_code_from_attributes(product_code: str, attribute_values: tuple[tuple[str, str], ...]) -> str:
+    base_code = product_code.strip()
+    color, size = _sku_code_match_values(attribute_values)
+    if not base_code or not color or not size:
+        return ""
+    return f"{base_code}{color}{size}"
+
+
+def _sku_code_match_values(attribute_values: tuple[tuple[str, str], ...]) -> tuple[str, str]:
+    attributes = {attribute.strip(): value.strip() for attribute, value in attribute_values}
+    color = attributes.get("颜色分类", "").strip()
+    size = (attributes.get("鞋码") or attributes.get("尺码") or "").strip()
+    return color, size
 
 
 def _size_sort_key(size: str) -> tuple[int, Decimal | str]:

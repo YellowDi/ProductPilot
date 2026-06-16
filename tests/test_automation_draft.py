@@ -12,6 +12,7 @@ from product_pilot.automation.draft import (
     color_sku_upload_targets,
     click_first_optional_button,
     draft_data_from_product,
+    fill_sku_codes,
     images_from_product,
     main_image_from_product,
     sku_option_groups,
@@ -127,6 +128,199 @@ class DraftSpikeDataTests(unittest.TestCase):
         self.assertEqual(data.product_code, "demo001")
         self.assertEqual(data.skus[0].option_values, ("黑色", "38"))
         self.assertEqual(data.skus[0].attribute_values, (("颜色分类", "黑色"), ("鞋码", "38")))
+        self.assertEqual(data.skus[0].sku_code, "demo001黑色38")
+
+    def test_builds_distinct_sku_codes_from_product_code_color_and_size(self) -> None:
+        product = ProductDraft.from_mapping(
+            {
+                "title": "Multi SKU Product",
+                "category": "default-category",
+                "product_code": "1111",
+                "images": [{"path": "images/main.jpg", "role": "main"}],
+                "skus": [
+                    {
+                        "name": "黑色 38",
+                        "attributes": {"颜色分类": "黑色", "鞋码": "38"},
+                        "price": "146.64",
+                        "stock": 1000,
+                    },
+                    {
+                        "name": "黑色 39",
+                        "attributes": {"颜色分类": "黑色", "鞋码": "39"},
+                        "price": "146.64",
+                        "stock": 1000,
+                    },
+                    {
+                        "name": "棕色 38",
+                        "attributes": {"颜色分类": "棕色", "鞋码": "38"},
+                        "price": "146.64",
+                        "stock": 1000,
+                    },
+                ],
+            }
+        )
+
+        data = draft_data_from_product(product)
+
+        self.assertEqual(
+            [sku.sku_code for sku in data.skus],
+            ["1111黑色38", "1111黑色39", "1111棕色38"],
+        )
+
+    def test_skips_sku_code_when_product_code_color_or_size_is_missing(self) -> None:
+        without_product_code = ProductDraft.from_mapping(
+            {
+                "title": "Multi SKU Product",
+                "category": "default-category",
+                "images": [{"path": "images/main.jpg", "role": "main"}],
+                "skus": [
+                    {
+                        "name": "黑色 42",
+                        "attributes": {"颜色分类": "黑色", "鞋码": "42"},
+                        "price": "146.64",
+                        "stock": 1000,
+                    }
+                ],
+            }
+        )
+        without_color_or_size = ProductDraft.from_mapping(
+            {
+                "title": "Multi SKU Product",
+                "category": "default-category",
+                "product_code": "1111",
+                "images": [{"path": "images/main.jpg", "role": "main"}],
+                "skus": [
+                    {
+                        "name": "missing color",
+                        "attributes": {"鞋码": "42"},
+                        "price": "146.64",
+                        "stock": 1000,
+                    },
+                    {
+                        "name": "missing size",
+                        "attributes": {"颜色分类": "黑色"},
+                        "price": "146.64",
+                        "stock": 1000,
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(draft_data_from_product(without_product_code).skus[0].sku_code, "")
+        self.assertEqual([sku.sku_code for sku in draft_data_from_product(without_color_or_size).skus], ["", ""])
+
+    def test_fills_sku_codes_with_color_and_size_targets(self) -> None:
+        class FakePage:
+            def __init__(self) -> None:
+                self.target_batches: list[list[dict[str, str]]] = []
+                self.scrolls = 0
+
+            def evaluate(self, expression: str, targets: list[dict[str, str]] | None = None) -> dict[str, object] | bool:
+                if targets is None:
+                    self.scrolls += 1
+                    return True
+                self.target_batches.append(targets)
+                return {"filled_labels": [targets[0]["label"]], "errors": []}
+
+            def wait_for_timeout(self, timeout: int) -> None:
+                return None
+
+        skus = (
+            DraftSkuData(
+                size="黑色 38",
+                attribute_values=(("颜色分类", "黑色"), ("鞋码", "38")),
+                sku_code="1111黑色38",
+            ),
+            DraftSkuData(
+                size="棕色 38",
+                attribute_values=(("颜色分类", "棕色"), ("鞋码", "38")),
+                sku_code="1111棕色38",
+            ),
+        )
+        page = FakePage()
+
+        self.assertEqual(fill_sku_codes(page, skus), 2)
+        self.assertEqual(
+            page.target_batches,
+            [
+                [
+                    {"sku_code": "1111黑色38", "color": "黑色", "size": "38", "label": "黑色 38"},
+                    {"sku_code": "1111棕色38", "color": "棕色", "size": "38", "label": "棕色 38"},
+                ],
+                [
+                    {"sku_code": "1111棕色38", "color": "棕色", "size": "38", "label": "棕色 38"},
+                ],
+            ],
+        )
+        self.assertEqual(page.scrolls, 1)
+
+    def test_keeps_scrolling_until_later_sku_code_rows_are_visible(self) -> None:
+        class FakePage:
+            def __init__(self) -> None:
+                self.fill_attempts = 0
+                self.scrolls = 0
+
+            def evaluate(self, expression: str, targets: list[dict[str, str]] | None = None) -> dict[str, object] | bool:
+                if targets is None:
+                    self.scrolls += 1
+                    return True
+                self.fill_attempts += 1
+                if self.fill_attempts < 5:
+                    return {"filled_labels": [], "errors": []}
+                return {"filled_labels": [targets[0]["label"]], "errors": []}
+
+            def wait_for_timeout(self, timeout: int) -> None:
+                return None
+
+        skus = (
+            DraftSkuData(
+                size="红色 43",
+                attribute_values=(("颜色分类", "红色"), ("鞋码", "43")),
+                sku_code="1111红色43",
+            ),
+        )
+        page = FakePage()
+
+        self.assertEqual(fill_sku_codes(page, skus), 1)
+        self.assertEqual(page.scrolls, 4)
+
+    def test_raises_when_sku_code_row_is_missing(self) -> None:
+        class FakePage:
+            def __init__(self) -> None:
+                self.scrolls = 0
+
+            def evaluate(self, expression: str, targets: list[dict[str, str]] | None = None) -> dict[str, object] | bool:
+                if targets is None:
+                    self.scrolls += 1
+                    return False
+                return {"filled_labels": [], "errors": []}
+
+        skus = (
+            DraftSkuData(
+                size="黑色 38",
+                attribute_values=(("颜色分类", "黑色"), ("鞋码", "38")),
+                sku_code="1111黑色38",
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "sku code row not found"):
+            fill_sku_codes(FakePage(), skus)
+
+    def test_raises_when_sku_code_row_matches_multiple_inputs(self) -> None:
+        class FakePage:
+            def evaluate(self, expression: str, targets: list[dict[str, str]] | None = None) -> dict[str, object] | bool:
+                return {"filled_labels": [], "errors": ["sku code row matched multiple inputs: 黑色 38"]}
+
+        skus = (
+            DraftSkuData(
+                size="黑色 38",
+                attribute_values=(("颜色分类", "黑色"), ("鞋码", "38")),
+                sku_code="1111黑色38",
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "matched multiple"):
+            fill_sku_codes(FakePage(), skus)
 
     def test_groups_sku_options_by_attribute(self) -> None:
         skus = (
